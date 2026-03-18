@@ -19,7 +19,7 @@ const SAFETY_CAP = 5_000_000; // absolute OOM guard
 
 // ── Public entry point ───────────────────────────────────────────────────────
 
-export function subdivide(geometry, maxEdgeLength, onProgress, faceWeights = null) {
+export async function subdivide(geometry, maxEdgeLength, onProgress, faceWeights = null) {
   // Derive per-face exclusion BEFORE toIndexed so we use the untouched
   // non-indexed weights (toIndexed uses MAX-merge which can push boundary
   // vertices to weight 1.0 even on included triangles).
@@ -56,6 +56,7 @@ export function subdivide(geometry, maxEdgeLength, onProgress, faceWeights = nul
     if (newIndices.length / 3 >= SAFETY_CAP) safetyCapHit = true;
 
     if (onProgress) onProgress(Math.min(0.95, (iter + 1) / maxIterations));
+    await new Promise(r => setTimeout(r, 0));
     if (!changed || safetyCapHit) break;
   }
 

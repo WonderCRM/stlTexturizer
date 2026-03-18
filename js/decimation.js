@@ -53,7 +53,7 @@ const _hlvLo = new Int32Array(128);
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
-export function decimate(geometry, targetTriangles, onProgress) {
+export async function decimate(geometry, targetTriangles, onProgress) {
   const { positions, faces, vertCount, faceCount } = buildIndexed(geometry);
 
   if (faceCount <= targetTriangles) return buildOutput(positions, faces, faceCount);
@@ -172,7 +172,10 @@ export function decimate(geometry, targetTriangles, onProgress) {
 
     if (onProgress && (++collapses & 511) === 0) {
       const p = Math.min(1, (initFaces - activeFaces) / toRemove);
-      if (p - lastProg > 0.015) { onProgress(p); lastProg = p; }
+      if (p - lastProg > 0.015) {
+        onProgress(p); lastProg = p;
+        await new Promise(r => setTimeout(r, 0));
+      }
     }
   }
 

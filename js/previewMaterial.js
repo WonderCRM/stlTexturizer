@@ -43,6 +43,7 @@ const fragmentShader = /* glsl */`
   uniform vec2      scaleUV;
   uniform float     amplitude;
   uniform vec2      offsetUV;
+  uniform float     rotation;
   uniform vec3      boundsMin;
   uniform vec3      boundsSize;
   uniform vec3      boundsCenter;
@@ -59,7 +60,13 @@ const fragmentShader = /* glsl */`
 
   // Sample after applying scale + tiling
   float sampleMap(vec2 rawUV) {
-    return texture2D(displacementMap, fract(rawUV / scaleUV + offsetUV)).r;
+    vec2 uv = rawUV / scaleUV + offsetUV;
+    // rotate around tile centre
+    float c = cos(rotation); float s = sin(rotation);
+    uv -= 0.5;
+    uv  = vec2(c * uv.x - s * uv.y, s * uv.x + c * uv.y);
+    uv += 0.5;
+    return texture2D(displacementMap, fract(uv)).r;
   }
 
   // Height at this fragment for all projection modes.
@@ -68,15 +75,17 @@ const fragmentShader = /* glsl */`
     vec3 pos = vModelPos;
     vec3 MN  = vModelNormal;  // model-space normal
     vec3 rel = pos - boundsCenter;
+    float maxDim = max(boundsSize.x, max(boundsSize.y, boundsSize.z));
+    float md = max(maxDim, 1e-4);
 
     if (mappingMode == 0) {
-      return sampleMap((pos.xy - boundsMin.xy) / max(boundsSize.xy, vec2(1e-4)));
+      return sampleMap(vec2((pos.x - boundsMin.x) / md, (pos.y - boundsMin.y) / md));
 
     } else if (mappingMode == 1) {
-      return sampleMap((pos.xz - boundsMin.xz) / max(boundsSize.xz, vec2(1e-4)));
+      return sampleMap(vec2((pos.x - boundsMin.x) / md, (pos.z - boundsMin.z) / md));
 
     } else if (mappingMode == 2) {
-      return sampleMap((pos.yz - boundsMin.yz) / max(boundsSize.yz, vec2(1e-4)));
+      return sampleMap(vec2((pos.y - boundsMin.y) / md, (pos.z - boundsMin.z) / md));
 
     } else if (mappingMode == 3) {
       // Cylindrical around Z axis (Z is up) with automatic caps.
@@ -114,9 +123,9 @@ const fragmentShader = /* glsl */`
       blend = pow(blend, vec3(4.0));
       blend /= dot(blend, vec3(1.0)) + 1e-4;
 
-      float hXY = sampleMap((pos.xy - boundsMin.xy) / max(boundsSize.xy, vec2(1e-4)));
-      float hXZ = sampleMap((pos.xz - boundsMin.xz) / max(boundsSize.xz, vec2(1e-4)));
-      float hYZ = sampleMap((pos.yz - boundsMin.yz) / max(boundsSize.yz, vec2(1e-4)));
+      float hXY = sampleMap(vec2((pos.x - boundsMin.x) / md, (pos.y - boundsMin.y) / md));
+      float hXZ = sampleMap(vec2((pos.x - boundsMin.x) / md, (pos.z - boundsMin.z) / md));
+      float hYZ = sampleMap(vec2((pos.y - boundsMin.y) / md, (pos.z - boundsMin.z) / md));
 
       return hXY * blend.z + hXZ * blend.y + hYZ * blend.x;
 
@@ -125,14 +134,11 @@ const fragmentShader = /* glsl */`
       // Picks the single planar projection whose axis is most aligned with the face normal.
       vec3 absN = abs(MN);
       if (absN.x >= absN.y && absN.x >= absN.z) {
-        // ±X dominant → project onto ZY plane (U=Z, V=Y keeps texture upright on side faces)
-        return sampleMap((pos.zy - boundsMin.zy) / max(boundsSize.zy, vec2(1e-4)));
+        return sampleMap(vec2((pos.z - boundsMin.z) / md, (pos.y - boundsMin.y) / md));
       } else if (absN.y >= absN.x && absN.y >= absN.z) {
-        // ±Y dominant → project onto XZ plane
-        return sampleMap((pos.xz - boundsMin.xz) / max(boundsSize.xz, vec2(1e-4)));
+        return sampleMap(vec2((pos.x - boundsMin.x) / md, (pos.z - boundsMin.z) / md));
       } else {
-        // ±Z dominant → project onto XY plane
-        return sampleMap((pos.xy - boundsMin.xy) / max(boundsSize.xy, vec2(1e-4)));
+        return sampleMap(vec2((pos.x - boundsMin.x) / md, (pos.y - boundsMin.y) / md));
       }
     }
   }
@@ -229,6 +235,7 @@ export function updateMaterial(material, displacementTexture, settings) {
   u.scaleUV.value.set(settings.scaleU, settings.scaleV);
   u.amplitude.value     = settings.amplitude;
   u.offsetUV.value.set(settings.offsetU, settings.offsetV);
+  u.rotation.value      = (settings.rotation ?? 0) * Math.PI / 180;
   if (settings.bounds) {
     u.boundsMin.value.copy(settings.bounds.min);
     u.boundsSize.value.copy(settings.bounds.size);
@@ -252,6 +259,7 @@ function buildUniforms(tex, settings) {
     scaleUV:         { value: new THREE.Vector2(settings.scaleU ?? 1, settings.scaleV ?? 1) },
     amplitude:       { value: settings.amplitude ?? 1.0 },
     offsetUV:        { value: new THREE.Vector2(settings.offsetU ?? 0, settings.offsetV ?? 0) },
+    rotation:        { value: ((settings.rotation ?? 0) * Math.PI / 180) },
     boundsMin:        { value: b.min.clone() },
     boundsSize:       { value: b.size.clone() },
     boundsCenter:     { value: b.center.clone() },

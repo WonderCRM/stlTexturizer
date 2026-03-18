@@ -198,14 +198,14 @@ main {
 /* ── Preset grid ─────────────────────────────────────────────────────── */
 .preset-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 6px;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 4px;
   margin-bottom: 10px;
 }
 
 .preset-swatch {
   aspect-ratio: 1;
-  border-radius: 5px;
+  border-radius: 4px;
   overflow: hidden;
   cursor: pointer;
   border: 2px solid transparent;
@@ -230,9 +230,9 @@ main {
   right: 0;
   background: rgba(0,0,0,0.6);
   color: #fff;
-  font-size: 9px;
+  font-size: 8px;
   text-align: center;
-  padding: 2px 0;
+  padding: 1px 0;
   opacity: 0;
   transition: opacity 0.15s;
 }
@@ -377,13 +377,34 @@ input[type="number"].val:focus { outline: none; border-color: var(--accent); }
 
 .export-progress.hidden { display: none; }
 
+.export-progress-track {
+  position: relative;
+  height: 14px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+
 .export-progress-bar {
-  height: 3px;
+  height: 100%;
   background: var(--accent);
   border-radius: 2px;
   width: 0%;
-  transition: width 0.1s;
-  margin-bottom: 6px;
+}
+
+.export-progress-pct {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 600;
+  color: #fff;
+  mix-blend-mode: difference;
+  pointer-events: none;
 }
 
 /* ── Export button ───────────────────────────────────────────────────── */

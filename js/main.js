@@ -3,7 +3,7 @@ import { initViewer, loadGeometry, setMeshMaterial, setWireframe,
          getControls, getCamera, getCurrentMesh,
          setExclusionOverlay, setHoverPreview } from './viewer.js';
 import { loadSTLFile, computeBounds, getTriangleCount }  from './stlLoader.js';
-import { PRESETS, loadCustomTexture }  from './presetTextures.js';
+import { loadPresets, loadCustomTexture }  from './presetTextures.js';
 import { createPreviewMaterial, updateMaterial } from './previewMaterial.js';
 import { subdivide }          from './subdivision.js';
 import { applyDisplacement }  from './displacement.js';
@@ -36,12 +36,13 @@ let _lastHoverTriIdx   = -1;          // last triangle index used for hover prev
 const _raycaster       = new THREE.Raycaster();
 
 const settings = {
-  mappingMode:   6,     // Cubic default
+  mappingMode:   5,     // Triplanar default
   scaleU:        1.0,
   scaleV:        1.0,
   amplitude:     0.5,
   offsetU:       0.0,
   offsetV:       0.0,
+  rotation:      0,
   refineLength:  1.0,
   maxTriangles:  1_000_000,
   lockScale:     true,
@@ -63,6 +64,7 @@ const meshInfo       = document.getElementById('mesh-info');
 const exportBtn        = document.getElementById('export-btn');
 const exportProgress   = document.getElementById('export-progress');
 const exportProgBar    = document.getElementById('export-progress-bar');
+const exportProgPct    = document.getElementById('export-progress-pct');
 const exportProgLbl    = document.getElementById('export-progress-label');
 const triLimitWarning  = document.getElementById('tri-limit-warning');
 const wireframeToggle  = document.getElementById('wireframe-toggle');
@@ -81,6 +83,8 @@ const scaleUVal    = document.getElementById('scale-u-val');
 const scaleVVal    = document.getElementById('scale-v-val');
 const offsetUVal   = document.getElementById('offset-u-val');
 const offsetVVal   = document.getElementById('offset-v-val');
+const rotationSlider = document.getElementById('rotation');
+const rotationVal    = document.getElementById('rotation-val');
 const amplitudeVal = document.getElementById('amplitude-val');
 const refineLenVal = document.getElementById('refine-length-val');
 const maxTriVal    = document.getElementById('max-triangles-val');
@@ -120,12 +124,18 @@ const posToScale = p => parseFloat(Math.exp(_LOG_MIN + (p / 1000) * (_LOG_MAX - 
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
+let PRESETS = [];
+
 initViewer(canvas);
-buildPresetGrid();
 wireEvents();
 // Sync scale number inputs with the slider's initial position
 scaleUVal.value = posToScale(parseFloat(scaleUSlider.value));
 scaleVVal.value = posToScale(parseFloat(scaleVSlider.value));
+
+loadPresets().then(presets => {
+  PRESETS = presets;
+  buildPresetGrid();
+}).catch(err => console.error('Failed to load preset textures:', err));
 
 // ── Preset grid ───────────────────────────────────────────────────────────────
 
@@ -241,6 +251,7 @@ function wireEvents() {
 
   linkSlider(offsetUSlider,   offsetUVal,   v => { settings.offsetU   = v; return v.toFixed(2); });
   linkSlider(offsetVSlider,   offsetVVal,   v => { settings.offsetV   = v; return v.toFixed(2); });
+  linkSlider(rotationSlider,  rotationVal,  v => { settings.rotation  = v; return Math.round(v); });
   linkSlider(amplitudeSlider, amplitudeVal, v => { settings.amplitude = v; return v.toFixed(2); });
   linkSlider(refineLenSlider, refineLenVal, v => { settings.refineLength  = v; return v.toFixed(1); }, false);
   linkSlider(maxTriSlider, maxTriVal, v => { settings.maxTriangles = v; return formatM(v); }, false);
@@ -542,8 +553,14 @@ function linkSlider(slider, valInput, onChangeFn, livePreview = true) {
     valInput.addEventListener('change', () => {
       const raw = parseFloat(valInput.value);
       if (isNaN(raw)) { valInput.value = slider.value; return; }
-      const clamped = Math.max(parseFloat(slider.min), Math.min(parseFloat(slider.max), raw));
-      slider.value = clamped;
+      // Clamp to the input's own min/max (may be wider than the slider range)
+      const inMin = parseFloat(valInput.min);
+      const inMax = parseFloat(valInput.max);
+      const clamped = (!isNaN(inMin) && !isNaN(inMax))
+        ? Math.max(inMin, Math.min(inMax, raw))
+        : raw;
+      // Move slider thumb to nearest valid position (saturates at slider edges)
+      slider.value = Math.max(parseFloat(slider.min), Math.min(parseFloat(slider.max), clamped));
       valInput.value = onChangeFn(clamped);
       if (livePreview) {
         clearTimeout(previewDebounce);
@@ -573,13 +590,12 @@ async function handleSTL(file) {
       previewMaterial = null;
     }
 
-    // Auto-select Brick preset (index 5) on first load
-    const brickIdx = PRESETS.findIndex(p => p.name === 'Brick');
-    if (brickIdx >= 0 && !activeMapEntry) {
-      activeMapEntry = PRESETS[brickIdx];
-      activeMapName.textContent = PRESETS[brickIdx].name;
+    // Auto-select first preset on first load
+    if (!activeMapEntry && PRESETS.length > 0) {
+      activeMapEntry = PRESETS[0];
+      activeMapName.textContent = PRESETS[0].name;
       const swatches = document.querySelectorAll('.preset-swatch');
-      swatches.forEach((s, i) => s.classList.toggle('active', i === brickIdx));
+      if (swatches.length > 0) swatches[0].classList.add('active');
     }
     mappingSelect.value = String(settings.mappingMode);
 
@@ -622,7 +638,7 @@ async function handleSTL(file) {
 
     // Default edge length = 1/100 of the largest bounding box dimension
     const maxDim = Math.max(bounds.size.x, bounds.size.y, bounds.size.z);
-    const defaultEdge = Math.max(0.1, Math.min(5.0, +(maxDim / 200).toFixed(2)));
+    const defaultEdge = Math.max(0.1, Math.min(5.0, +(maxDim / 100).toFixed(2)));
     settings.refineLength = defaultEdge;
     refineLenSlider.value = defaultEdge;
     refineLenVal.value = defaultEdge;
@@ -719,6 +735,7 @@ async function handleExport() {
 
   try {
     setProgress(0.02, 'Subdividing mesh…');
+    await yieldFrame();
 
     // Build per-vertex exclusion weights combining user-painted exclusion + angle masking.
     // Faces masked by top/bottom angle limits are treated the same as user-excluded faces
@@ -729,10 +746,10 @@ async function handleExport() {
       ? buildCombinedFaceWeights(currentGeometry, excludedFaces, selectionMode, settings)
       : null;
 
-    const { geometry: subdivided, safetyCapHit } = await runAsync(() =>
-      subdivide(currentGeometry, settings.refineLength,
-                (p) => setProgress(0.02 + p * 0.35, 'Subdividing mesh…'),
-                faceWeights)
+    const { geometry: subdivided, safetyCapHit } = await subdivide(
+      currentGeometry, settings.refineLength,
+      (p) => setProgress(0.02 + p * 0.35, 'Subdividing mesh…'),
+      faceWeights
     );
 
     const subTriCount = subdivided.attributes.position.count / 3;
@@ -761,7 +778,13 @@ async function handleExport() {
         decimate(
           displaced,
           settings.maxTriangles,
-          (p) => setProgress(0.71 + p * 0.25, `Decimating mesh…`)
+          (p) => {
+            const cur = Math.round(dispTriCount - (dispTriCount - settings.maxTriangles) * p);
+            setProgress(
+              0.71 + p * 0.25,
+              `Decimating: ${cur.toLocaleString()} → ${settings.maxTriangles.toLocaleString()} triangles`
+            );
+          }
         )
       );
     }
@@ -800,7 +823,9 @@ async function handleExport() {
 }
 
 function setProgress(fraction, label) {
-  exportProgBar.style.width = `${Math.round(fraction * 100)}%`;
+  const pct = Math.round(fraction * 100);
+  exportProgBar.style.width = `${pct}%`;
+  exportProgPct.textContent = `${pct}%`;
   exportProgLbl.textContent = label;
 }
 

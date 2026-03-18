@@ -27,26 +27,29 @@ const TWO_PI = Math.PI * 2;
 export function computeUV(pos, normal, mode, settings, bounds) {
   const { min, size, center } = bounds;
   const { scaleU, scaleV, offsetU, offsetV } = settings;
+  const rotRad = (settings.rotation ?? 0) * Math.PI / 180;
+  const maxDim = Math.max(size.x, size.y, size.z);
+  const md     = Math.max(maxDim, 1e-6);
 
   let u = 0, v = 0;
 
   switch (mode) {
 
     case MODE_PLANAR_XY: {
-      u = (pos.x - min.x) / Math.max(size.x, 1e-6);
-      v = (pos.y - min.y) / Math.max(size.y, 1e-6);
+      u = (pos.x - min.x) / md;
+      v = (pos.y - min.y) / md;
       break;
     }
 
     case MODE_PLANAR_XZ: {
-      u = (pos.x - min.x) / Math.max(size.x, 1e-6);
-      v = (pos.z - min.z) / Math.max(size.z, 1e-6);
+      u = (pos.x - min.x) / md;
+      v = (pos.z - min.z) / md;
       break;
     }
 
     case MODE_PLANAR_YZ: {
-      u = (pos.y - min.y) / Math.max(size.y, 1e-6);
-      v = (pos.z - min.z) / Math.max(size.z, 1e-6);
+      u = (pos.y - min.y) / md;
+      v = (pos.z - min.z) / md;
       break;
     }
 
@@ -93,23 +96,16 @@ export function computeUV(pos, normal, mode, settings, bounds) {
       const az = Math.abs(normal.z);
       let uRaw, vRaw;
       if (ax >= ay && ax >= az) {
-        // ±X dominant → project onto ZY (U=Z, V=Y keeps texture upright on side faces)
-        uRaw = (pos.z - min.z) / Math.max(size.z, 1e-6);
-        vRaw = (pos.y - min.y) / Math.max(size.y, 1e-6);
+        uRaw = (pos.z - min.z) / md;
+        vRaw = (pos.y - min.y) / md;
       } else if (ay >= ax && ay >= az) {
-        // ±Y dominant → project onto XZ
-        uRaw = (pos.x - min.x) / Math.max(size.x, 1e-6);
-        vRaw = (pos.z - min.z) / Math.max(size.z, 1e-6);
+        uRaw = (pos.x - min.x) / md;
+        vRaw = (pos.z - min.z) / md;
       } else {
-        // ±Z dominant → project onto XY
-        uRaw = (pos.x - min.x) / Math.max(size.x, 1e-6);
-        vRaw = (pos.y - min.y) / Math.max(size.y, 1e-6);
+        uRaw = (pos.x - min.x) / md;
+        vRaw = (pos.y - min.y) / md;
       }
-      return {
-        triplanar: false,
-        u: fract(uRaw / scaleU + offsetU),
-        v: fract(vRaw / scaleV + offsetV),
-      };
+      return applyTransform(uRaw, vRaw, scaleU, scaleV, offsetU, offsetV, rotRad);
     }
 
     case MODE_TRIPLANAR:
@@ -128,40 +124,47 @@ export function computeUV(pos, normal, mode, settings, bounds) {
       const wz = bz / sum;
 
       const uvXY = {
-        u: (pos.x - min.x) / Math.max(size.x, 1e-6),
-        v: (pos.y - min.y) / Math.max(size.y, 1e-6),
+        u: (pos.x - min.x) / md,
+        v: (pos.y - min.y) / md,
         w: wz,
       };
       const uvXZ = {
-        u: (pos.x - min.x) / Math.max(size.x, 1e-6),
-        v: (pos.z - min.z) / Math.max(size.z, 1e-6),
+        u: (pos.x - min.x) / md,
+        v: (pos.z - min.z) / md,
         w: wy,
       };
       const uvYZ = {
-        u: (pos.y - min.y) / Math.max(size.y, 1e-6),
-        v: (pos.z - min.z) / Math.max(size.z, 1e-6),
+        u: (pos.y - min.y) / md,
+        v: (pos.z - min.z) / md,
         w: wx,
       };
 
-      // Apply scale+offset and tile each independently
-      // We return a special { triplanar: true, samples } object.
-      // The caller (displacement.js) handles the 3-sample blend itself.
+      // Apply scale+offset+rotation and tile each independently
       return {
         triplanar: true,
         samples: [
-          { u: fract(uvXY.u / scaleU + offsetU), v: fract(uvXY.v / scaleV + offsetV), w: uvXY.w },
-          { u: fract(uvXZ.u / scaleU + offsetU), v: fract(uvXZ.v / scaleV + offsetV), w: uvXZ.w },
-          { u: fract(uvYZ.u / scaleU + offsetU), v: fract(uvYZ.v / scaleV + offsetV), w: uvYZ.w },
+          { ...applyTransform(uvXY.u, uvXY.v, scaleU, scaleV, offsetU, offsetV, rotRad), w: uvXY.w },
+          { ...applyTransform(uvXZ.u, uvXZ.v, scaleU, scaleV, offsetU, offsetV, rotRad), w: uvXZ.w },
+          { ...applyTransform(uvYZ.u, uvYZ.v, scaleU, scaleV, offsetU, offsetV, rotRad), w: uvYZ.w },
         ],
       };
     }
   }
 
-  return {
-    triplanar: false,
-    u: fract(u / scaleU + offsetU),
-    v: fract(v / scaleV + offsetV),
-  };
+  return applyTransform(u, v, scaleU, scaleV, offsetU, offsetV, rotRad);
+}
+
+function applyTransform(u, v, scaleU, scaleV, offsetU, offsetV, rotRad) {
+  let uu = u / scaleU + offsetU;
+  let vv = v / scaleV + offsetV;
+  if (rotRad !== 0) {
+    const c = Math.cos(rotRad), s = Math.sin(rotRad);
+    uu -= 0.5; vv -= 0.5;
+    const ru = c * uu - s * vv;
+    const rv = s * uu + c * vv;
+    uu = ru + 0.5; vv = rv + 0.5;
+  }
+  return { triplanar: false, u: fract(uu), v: fract(vv) };
 }
 
 /** Fractional part, always positive (mirrors GLSL fract) */
