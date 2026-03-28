@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { initViewer, loadGeometry, setMeshMaterial, setMeshGeometry, setWireframe,
          getControls, getCamera, getCurrentMesh,
          setExclusionOverlay, setHoverPreview, setViewerTheme } from './viewer.js';
-import { loadSTLFile, computeBounds, getTriangleCount }  from './stlLoader.js';
+import { loadModelFile, computeBounds, getTriangleCount }  from './stlLoader.js';
 import { loadPresets, loadCustomTexture }  from './presetTextures.js';
 import { createPreviewMaterial, updateMaterial } from './previewMaterial.js';
 import { subdivide }          from './subdivision.js';
@@ -242,9 +242,9 @@ function wireEvents() {
     });
   });
 
-  // ── STL loading ──
+  // ── Model loading ──
   stlFileInput.addEventListener('change', (e) => {
-    if (e.target.files[0]) handleSTL(e.target.files[0]);
+    if (e.target.files[0]) handleModelFile(e.target.files[0]);
   });
 
   // Drag & drop on the viewport section
@@ -256,8 +256,8 @@ function wireEvents() {
   dropZone.addEventListener('drop', (e) => {
     e.preventDefault();
     dropZone.classList.remove('drag-over');
-    const file = [...e.dataTransfer.files].find(f => f.name.toLowerCase().endsWith('.stl'));
-    if (file) handleSTL(file);
+    const file = [...e.dataTransfer.files].find(f => /\.(stl|obj|3mf)$/i.test(f.name));
+    if (file) handleModelFile(file);
   });
 
   // Allow clicking the drop zone to open the file picker (except on canvas)
@@ -1030,12 +1030,12 @@ function loadDefaultCube() {
   updatePreview();
 }
 
-async function handleSTL(file) {
+async function handleModelFile(file) {
   try {
-    const { geometry, bounds } = await loadSTLFile(file);
+    const { geometry, bounds } = await loadModelFile(file);
     currentGeometry = geometry;
     currentBounds   = bounds;
-    currentStlName  = file.name.replace(/\.stl$/i, '');
+    currentStlName  = file.name.replace(/\.(stl|obj|3mf)$/i, '');
     checkAmplitudeWarning();
 
     // Dispose old preview material and reset state for the new mesh
@@ -1113,7 +1113,7 @@ async function handleSTL(file) {
     exportBtn.disabled = (activeMapEntry === null);
     updatePreview();
   } catch (err) {
-    console.error('Failed to load STL:', err);
+    console.error('Failed to load model:', err);
     alert(t('alerts.loadFailed', { msg: err.message }));
   }
 }

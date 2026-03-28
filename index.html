@@ -31,7 +31,8 @@
   {
     "imports": {
       "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
-      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
+      "fflate": "https://cdn.jsdelivr.net/npm/fflate@0.8.2/esm/browser.js"
     }
   }
   </script>
@@ -67,8 +68,8 @@
             <path d="M2 17L12 22L22 17" stroke="#555" stroke-width="1.2" stroke-linejoin="round"/>
             <path d="M2 12L12 17L22 12" stroke="#555" stroke-width="1.2" stroke-linejoin="round"/>
           </svg>
-          <p data-i18n-html="dropHint.text">Drop an <strong>.stl</strong> file here<br/>or <label for="stl-file-input" class="link-label">click to browse</label></p>
-          <input type="file" id="stl-file-input" accept=".stl" hidden />
+          <p data-i18n-html="dropHint.text">Drop an <strong>.stl</strong>, <strong>.obj</strong> or <strong>.3mf</strong> file here<br/>or <label for="stl-file-input" class="link-label">click to browse</label></p>
+          <input type="file" id="stl-file-input" accept=".stl,.obj,.3mf" hidden />
         </div>
         <canvas id="viewport"></canvas>
         <div id="brush-cursor"></div>
@@ -95,7 +96,7 @@
         <div class="load-stl-row">
           <label class="upload-btn" for="stl-file-input" style="flex:1;justify-content:center;">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 2L2 7l10 5 10-5-10-5Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
-            <span data-i18n="ui.loadStl">Load STL…</span>
+            <span data-i18n="ui.loadStl">Load Model…</span>
           </label>
           <button id="place-on-face-btn" class="place-on-face-btn" data-i18n-title="ui.placeOnFaceTitle" title="Click a face to orient it downward onto the print bed">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 3v14m0 0l-5-5m5 5l5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 21h16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
@@ -143,12 +144,12 @@
           <input type="number" class="val" id="seam-blend-val" value="1" min="0" max="1" step="0.01" />
         </div>
         <div class="form-row slider-row">
-          <label for="seam-band-width" title="Width of the blending zone near seam edges. Lower values keep transitions tight to the seam; higher values blend a wider band.">Smoothing ⓘ</label>
+          <label for="seam-band-width" data-i18n="labels.smoothing" data-i18n-title="tooltips.smoothing" title="Width of the blending zone near seam edges. Lower values keep transitions tight to the seam; higher values blend a wider band.">Smoothing ⓘ</label>
           <input type="range" id="seam-band-width" min="0" max="1" step="0.01" value="0.5" />
           <input type="number" class="val" id="seam-band-width-val" value="0.5" min="0" max="1" step="0.01" />
         </div>
         <div class="form-row slider-row" id="cap-angle-row" style="display:none">
-          <label for="cap-angle" title="Angle (in degrees) from vertical at which the top/bottom cap projection kicks in. Smaller values limit cap projection to nearly flat faces.">Cap Angle ⓘ</label>
+          <label for="cap-angle" data-i18n="labels.capAngle" data-i18n-title="tooltips.capAngle" title="Angle (in degrees) from vertical at which the top/bottom cap projection kicks in. Smaller values limit cap projection to nearly flat faces.">Cap Angle ⓘ</label>
           <input type="range" id="cap-angle" min="1" max="89" step="1" value="20" />
           <input type="number" class="val" id="cap-angle-val" value="20" min="1" max="89" step="1" />
         </div>

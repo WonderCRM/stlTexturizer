@@ -10,15 +10,15 @@ export const TRANSLATIONS = {
     'theme.toggleAriaLabel':   'Toggle light/dark mode',
 
     // Drop zone
-    'dropHint.text': 'Drop an <strong>.stl</strong> file here<br/>or <label for="stl-file-input" class="link-label">click to browse</label>',
+    'dropHint.text': 'Drop an <strong>.stl</strong>, <strong>.obj</strong> or <strong>.3mf</strong> file here<br/>or <label for="stl-file-input" class="link-label">click to browse</label>',
 
     // Viewport footer
     'ui.wireframe':      'Wireframe',
     'ui.controlsHint':   'Left drag: orbit \u00a0·\u00a0 Right drag: pan \u00a0·\u00a0 Scroll: zoom',
     'ui.meshInfo':       '{n} triangles · {mb} MB · {sx} × {sy} × {sz} mm',
 
-    // Load STL button
-    'ui.loadStl':        'Load STL\u2026',
+    // Load model button
+    'ui.loadStl':        'Load Model\u2026',
 
     // Displacement map section
     'sections.displacementMap': 'Displacement Map',
@@ -53,6 +53,10 @@ export const TRANSLATIONS = {
     // Seam blend
     'labels.seamBlend':              'Seam Blend \u24d8',
     'tooltips.seamBlend':            'Softens the hard seam where projection faces meet. Effective for Cubic and Cylindrical modes.',
+    'labels.smoothing':              'Smoothing \u24d8',
+    'tooltips.smoothing':            'Width of the blending zone near seam edges. Lower values keep transitions tight to the seam; higher values blend a wider band.',
+    'labels.capAngle':               'Cap Angle \u24d8',
+    'tooltips.capAngle':             'Angle (in degrees) from vertical at which the top/bottom cap projection kicks in. Smaller values limit cap projection to nearly flat faces.',
 
     // Mask angles section
     'sections.maskAngles':           'Mask Angles \u24d8',
@@ -150,7 +154,7 @@ export const TRANSLATIONS = {
     'cta.storeDismiss':  'Dismiss',
 
     // Alerts
-    'alerts.loadFailed':   'Could not load STL: {msg}',
+    'alerts.loadFailed':   'Could not load model: {msg}',
     'alerts.exportFailed': 'Export failed: {msg}',
   },
 
@@ -162,15 +166,15 @@ export const TRANSLATIONS = {
     'theme.toggleAriaLabel':   'Hell/Dunkel-Modus wechseln',
 
     // Drop zone
-    'dropHint.text': '<strong>.stl</strong>-Datei hier ablegen<br/>oder <label for="stl-file-input" class="link-label">zum Durchsuchen klicken</label>',
+    'dropHint.text': '<strong>.stl</strong>-, <strong>.obj</strong>- oder <strong>.3mf</strong>-Datei hier ablegen<br/>oder <label for="stl-file-input" class="link-label">zum Durchsuchen klicken</label>',
 
     // Viewport footer
     'ui.wireframe':      'Drahtgitter',
     'ui.controlsHint':   'Linke Maustaste: Drehen \u00a0·\u00a0 Rechte Maustaste: Verschieben \u00a0·\u00a0 Mausrad: Zoomen',
     'ui.meshInfo':       '{n} Dreiecke · {mb} MB · {sx} × {sy} × {sz} mm',
 
-    // Load STL button
-    'ui.loadStl':        'STL laden\u2026',
+    // Load model button
+    'ui.loadStl':        'Modell laden\u2026',
 
     // Displacement map section
     'sections.displacementMap': 'Textur',
@@ -205,6 +209,10 @@ export const TRANSLATIONS = {
     // Seam blend
     'labels.seamBlend':              'Nahtglättung \u24d8',
     'tooltips.seamBlend':            'Glättet den scharfen Übergang zwischen Projektionsflächen. Wirksam für Kubische und Zylindrische Modi.',
+    'labels.smoothing':              'Glättung \u24d8',
+    'tooltips.smoothing':            'Breite der Übergangszone an Nahtkanten. Niedrige Werte halten den Übergang nah an der Naht; höhere Werte glätten einen breiteren Bereich.',
+    'labels.capAngle':               'Übergangswinkel \u24d8',
+    'tooltips.capAngle':             'Winkel (in Grad) ab dem die Deckel-/Bodenprojektion einsetzt. Kleinere Werte beschränken die Deckelprojektion auf nahezu flache Flächen.',
 
     // Winkelmaskierung
     'sections.maskAngles':           'Winkel maskieren \u24d8',
@@ -302,7 +310,7 @@ export const TRANSLATIONS = {
     'cta.storeDismiss':    'Ausblenden',
 
     // Alerts
-    'alerts.loadFailed':   'STL konnte nicht geladen werden: {msg}',
+    'alerts.loadFailed':   'Modell konnte nicht geladen werden: {msg}',
     'alerts.exportFailed': 'Export fehlgeschlagen: {msg}',
   },
 };
