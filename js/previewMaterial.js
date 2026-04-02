@@ -38,6 +38,7 @@ const sharedGLSL = /* glsl */`
   uniform float     capAngle;
   uniform int       symmetricDisplacement;
   uniform int       useDisplacement;
+  uniform vec2      textureAspect;
 
   const float PI     = 3.14159265358979;
   const float TWO_PI = 6.28318530717959;
@@ -81,9 +82,9 @@ const sharedGLSL = /* glsl */`
     return blendedWeights / (dot(blendedWeights, vec3(1.0)) + 1e-6);
   }
 
-  // Sample after applying scale + tiling
+  // Sample after applying scale + tiling (aspect-corrected)
   float sampleMap(vec2 rawUV) {
-    vec2 uv = rawUV / scaleUV + offsetUV;
+    vec2 uv = (rawUV * textureAspect) / scaleUV + offsetUV;
     float c = cos(rotation); float s = sin(rotation);
     uv -= 0.5;
     uv  = vec2(c * uv.x - s * uv.y, s * uv.x + c * uv.y);
@@ -159,15 +160,29 @@ const sharedGLSL = /* glsl */`
       vec3 blend = abs(projN);
       blend = pow(blend, vec3(4.0));
       blend /= dot(blend, vec3(1.0)) + 1e-4;
-      float hXY = sampleMap(vec2((pos.x - boundsMin.x) / md, (pos.y - boundsMin.y) / md));
-      float hXZ = sampleMap(vec2((pos.x - boundsMin.x) / md, (pos.z - boundsMin.z) / md));
-      float hYZ = sampleMap(vec2((pos.y - boundsMin.y) / md, (pos.z - boundsMin.z) / md));
+      // Flip U based on normal sign so opposite faces show correct (non-mirrored) text.
+      float yzU = (pos.y - boundsMin.y) / md;
+      if (projN.x < 0.0) yzU = -yzU;
+      float xzU = (pos.x - boundsMin.x) / md;
+      if (projN.y > 0.0) xzU = -xzU;
+      float xyU = (pos.x - boundsMin.x) / md;
+      if (projN.z < 0.0) xyU = -xyU;
+      float hXY = sampleMap(vec2(xyU, (pos.y - boundsMin.y) / md));
+      float hXZ = sampleMap(vec2(xzU, (pos.z - boundsMin.z) / md));
+      float hYZ = sampleMap(vec2(yzU, (pos.z - boundsMin.z) / md));
       return hXY * blend.z + hXZ * blend.y + hYZ * blend.x;
 
     } else {
-      float hYZ = sampleMap(vec2((pos.y - boundsMin.y) / md, (pos.z - boundsMin.z) / md));
-      float hXZ = sampleMap(vec2((pos.x - boundsMin.x) / md, (pos.z - boundsMin.z) / md));
-      float hXY = sampleMap(vec2((pos.x - boundsMin.x) / md, (pos.y - boundsMin.y) / md));
+      // Flip U based on normal sign so opposite faces show correct (non-mirrored) text.
+      float yzU = (pos.y - boundsMin.y) / md;
+      if (projN.x < 0.0) yzU = -yzU;
+      float xzU = (pos.x - boundsMin.x) / md;
+      if (projN.y > 0.0) xzU = -xzU;
+      float xyU = (pos.x - boundsMin.x) / md;
+      if (projN.z < 0.0) xyU = -xyU;
+      float hYZ = sampleMap(vec2(yzU, (pos.z - boundsMin.z) / md));
+      float hXZ = sampleMap(vec2(xzU, (pos.z - boundsMin.z) / md));
+      float hXY = sampleMap(vec2(xyU, (pos.y - boundsMin.y) / md));
       vec3 bN = blendN;
       vec3 absFaceN = abs(projN);
       float facePrimary = max(absFaceN.x, max(absFaceN.y, absFaceN.z));
@@ -355,6 +370,7 @@ export function updateMaterial(material, displacementTexture, settings) {
   u.capAngle.value                = settings.capAngle                ?? 20.0;
   u.symmetricDisplacement.value   = settings.symmetricDisplacement   ? 1 : 0;
   u.useDisplacement.value         = settings.useDisplacement         ? 1 : 0;
+  u.textureAspect.value.set(settings.textureAspectU ?? 1, settings.textureAspectV ?? 1);
 }
 
 // ── Internal ──────────────────────────────────────────────────────────────────
@@ -382,6 +398,7 @@ function buildUniforms(tex, settings) {
     capAngle:                 { value: settings.capAngle                 ?? 20.0 },
     symmetricDisplacement:    { value: settings.symmetricDisplacement   ? 1 : 0 },
     useDisplacement:          { value: settings.useDisplacement         ? 1 : 0 },
+    textureAspect:            { value: new THREE.Vector2(settings.textureAspectU ?? 1, settings.textureAspectV ?? 1) },
   };
 }
 

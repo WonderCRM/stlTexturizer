@@ -1423,7 +1423,18 @@ function getEffectiveMapEntry() {
 function updatePreview() {
   if (!currentGeometry || !currentBounds) return;
 
-  const fullSettings = { ...settings, bounds: currentBounds };
+  // Texture aspect correction so non-square textures keep their proportions.
+  // A 512×279 texture needs aspectV = 512/279 ≈ 1.84 so V tiles faster (more
+  // repetitions), making each tile shorter in world-space to match the texture's
+  // wider-than-tall content.  The wider axis gets aspect = 1 (unchanged).
+  const tw = activeMapEntry?.width ?? 1, th = activeMapEntry?.height ?? 1;
+  const tmax = Math.max(tw, th, 1);
+  const fullSettings = {
+    ...settings,
+    bounds: currentBounds,
+    textureAspectU: tmax / Math.max(tw, 1),
+    textureAspectV: tmax / Math.max(th, 1),
+  };
 
   if (!activeMapEntry) {
     // No map yet — plain material

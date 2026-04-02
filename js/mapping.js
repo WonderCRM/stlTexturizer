@@ -104,7 +104,13 @@ export function getCubicBlendWeights(normal, blend, seamBandWidth = 0.35) {
  */
 export function computeUV(pos, normal, mode, settings, bounds) {
   const { min, size, center } = bounds;
-  const { scaleU, scaleV, offsetU, offsetV } = settings;
+  // Compensate for non-square textures: divide scale by aspect correction
+  // so equal world-space distances produce equal physical texture distances.
+  const aU = settings.textureAspectU ?? 1;
+  const aV = settings.textureAspectV ?? 1;
+  const scaleU = (settings.scaleU) / aU;
+  const scaleV = (settings.scaleV) / aV;
+  const { offsetU, offsetV } = settings;
   const rotRad = (settings.rotation ?? 0) * Math.PI / 180;
   const maxDim = Math.max(size.x, size.y, size.z);
   const md     = Math.max(maxDim, 1e-6);
@@ -230,9 +236,17 @@ export function computeUV(pos, normal, mode, settings, bounds) {
 
     case MODE_CUBIC: {
       const weights = getCubicBlendWeights(normal, settings.mappingBlend ?? 0.0, settings.seamBandWidth ?? 0.35);
-      const tYZ = applyTransform((pos.y - min.y) / md, (pos.z - min.z) / md, scaleU, scaleV, offsetU, offsetV, rotRad);
-      const tXZ = applyTransform((pos.x - min.x) / md, (pos.z - min.z) / md, scaleU, scaleV, offsetU, offsetV, rotRad);
-      const tXY = applyTransform((pos.x - min.x) / md, (pos.y - min.y) / md, scaleU, scaleV, offsetU, offsetV, rotRad);
+      // Flip U based on normal sign so opposite faces show correct (non-mirrored) text.
+      // Derived from camera right = view_dir × up_dir for each face orientation (Z-up).
+      let yzU = (pos.y - min.y) / md;
+      if (normal.x < 0) yzU = -yzU;
+      let xzU = (pos.x - min.x) / md;
+      if (normal.y > 0) xzU = -xzU;
+      let xyU = (pos.x - min.x) / md;
+      if (normal.z < 0) xyU = -xyU;
+      const tYZ = applyTransform(yzU, (pos.z - min.z) / md, scaleU, scaleV, offsetU, offsetV, rotRad);
+      const tXZ = applyTransform(xzU, (pos.z - min.z) / md, scaleU, scaleV, offsetU, offsetV, rotRad);
+      const tXY = applyTransform(xyU, (pos.y - min.y) / md, scaleU, scaleV, offsetU, offsetV, rotRad);
 
       if (weights.x > 0.999) return tYZ;
       if (weights.y > 0.999) return tXZ;
@@ -263,18 +277,25 @@ export function computeUV(pos, normal, mode, settings, bounds) {
       const wy = by / sum;
       const wz = bz / sum;
 
+      // Flip U based on normal sign so opposite faces show correct (non-mirrored) text.
+      let yzU = (pos.y - min.y) / md;
+      if (normal.x < 0) yzU = -yzU;
+      let xzU = (pos.x - min.x) / md;
+      if (normal.y > 0) xzU = -xzU;
+      let xyU = (pos.x - min.x) / md;
+      if (normal.z < 0) xyU = -xyU;
       const uvXY = {
-        u: (pos.x - min.x) / md,
+        u: xyU,
         v: (pos.y - min.y) / md,
         w: wz,
       };
       const uvXZ = {
-        u: (pos.x - min.x) / md,
+        u: xzU,
         v: (pos.z - min.z) / md,
         w: wy,
       };
       const uvYZ = {
-        u: (pos.y - min.y) / md,
+        u: yzU,
         v: (pos.z - min.z) / md,
         w: wx,
       };

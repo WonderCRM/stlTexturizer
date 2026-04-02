@@ -36,6 +36,14 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
   const edge2   = new THREE.Vector3();
   const faceNrm = new THREE.Vector3();
 
+  // Texture aspect correction so non-square textures keep their proportions.
+  // The shorter axis gets aspect > 1 so it tiles faster, making each tile
+  // proportionally shorter in world-space to match the texture's content.
+  const tmax = Math.max(imgWidth, imgHeight, 1);
+  const aspectU = tmax / Math.max(imgWidth, 1);
+  const aspectV = tmax / Math.max(imgHeight, 1);
+  const settingsWithAspect = { ...settings, textureAspectU: aspectU, textureAspectV: aspectV };
+
   const QUANT = 1e4;
   const posKey = (x, y, z) =>
     `${Math.round(x * QUANT)}_${Math.round(y * QUANT)}_${Math.round(z * QUANT)}`;
@@ -203,15 +211,21 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
         const rotRad = (settings.rotation ?? 0) * Math.PI / 180;
         let grey = 0;
         if (za[0] > 0) { // X-dominant zone → YZ projection
-          const uv = _cubicUV((tmpPos.y-bounds.min.y)/md, (tmpPos.z-bounds.min.z)/md, settings, rotRad);
+          let rawU = (tmpPos.y-bounds.min.y)/md;
+          if (sn[0] < 0) rawU = -rawU; // flip U for -X faces
+          const uv = _cubicUV(rawU, (tmpPos.z-bounds.min.z)/md, settings, rotRad, aspectU, aspectV);
           grey += sampleBilinear(imageData.data, imgWidth, imgHeight, uv.u, uv.v) * (za[0]/total);
         }
         if (za[1] > 0) { // Y-dominant zone → XZ projection
-          const uv = _cubicUV((tmpPos.x-bounds.min.x)/md, (tmpPos.z-bounds.min.z)/md, settings, rotRad);
+          let rawU = (tmpPos.x-bounds.min.x)/md;
+          if (sn[1] > 0) rawU = -rawU; // flip U for +Y faces
+          const uv = _cubicUV(rawU, (tmpPos.z-bounds.min.z)/md, settings, rotRad, aspectU, aspectV);
           grey += sampleBilinear(imageData.data, imgWidth, imgHeight, uv.u, uv.v) * (za[1]/total);
         }
         if (za[2] > 0) { // Z-dominant zone → XY projection
-          const uv = _cubicUV((tmpPos.x-bounds.min.x)/md, (tmpPos.y-bounds.min.y)/md, settings, rotRad);
+          let rawU = (tmpPos.x-bounds.min.x)/md;
+          if (sn[2] < 0) rawU = -rawU; // flip U for -Z faces
+          const uv = _cubicUV(rawU, (tmpPos.y-bounds.min.y)/md, settings, rotRad, aspectU, aspectV);
           grey += sampleBilinear(imageData.data, imgWidth, imgHeight, uv.u, uv.v) * (za[2]/total);
         }
         dispCache.set(k, grey);
@@ -221,7 +235,7 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
 
     tmpNrm.set(sn[0], sn[1], sn[2]);
 
-    const uvResult = computeUV(tmpPos, tmpNrm, settings.mappingMode, settings, bounds);
+    const uvResult = computeUV(tmpPos, tmpNrm, settings.mappingMode, settingsWithAspect, bounds);
     let grey;
     if (uvResult.triplanar) {
       grey = 0;
@@ -321,6 +335,9 @@ function sampleBilinear(data, w, h, u, v) {
   // Ensure [0,1) — guard against floating-point edge cases
   u = ((u % 1) + 1) % 1;
   v = ((v % 1) + 1) % 1;
+  // Flip V to match WebGL/Three.js texture convention (flipY=true means
+  // v=0 is the bottom of the image, but ImageData row 0 is the top).
+  v = 1 - v;
 
   const fx = u * (w - 1);
   const fy = v * (h - 1);
@@ -345,9 +362,9 @@ function sampleBilinear(data, w, h, u, v) {
 
 /** Apply scale/offset/rotation to raw UV for cubic projection.
  *  Mirrors the private applyTransform helper in mapping.js. */
-function _cubicUV(rawU, rawV, settings, rotRad) {
-  let u = rawU / settings.scaleU + settings.offsetU;
-  let v = rawV / settings.scaleV + settings.offsetV;
+function _cubicUV(rawU, rawV, settings, rotRad, aspectU, aspectV) {
+  let u = (rawU * aspectU) / settings.scaleU + settings.offsetU;
+  let v = (rawV * aspectV) / settings.scaleV + settings.offsetV;
   if (rotRad !== 0) {
     const c = Math.cos(rotRad), s = Math.sin(rotRad);
     u -= 0.5; v -= 0.5;
