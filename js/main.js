@@ -235,6 +235,9 @@ const precisionWarning        = document.getElementById('precision-warning');
 const licenseLink    = document.getElementById('license-link');
 const licenseOverlay = document.getElementById('license-overlay');
 const licenseClose   = document.getElementById('license-close');
+const imprintLink    = document.getElementById('imprint-link');
+const imprintOverlay = document.getElementById('imprint-overlay');
+const imprintClose   = document.getElementById('imprint-close');
 
 // ── Scale slider log helpers ──────────────────────────────────────────────────
 // Slider stores 0–1000; actual scale spans 0.05–10 on a log axis.
@@ -465,6 +468,13 @@ function wireEvents() {
     if (e.target === licenseOverlay) licenseOverlay.classList.add('hidden');
   });
 
+  // ── Imprint & Privacy ──
+  imprintLink.addEventListener('click', () => imprintOverlay.classList.remove('hidden'));
+  imprintClose.addEventListener('click', () => imprintOverlay.classList.add('hidden'));
+  imprintOverlay.addEventListener('click', (e) => {
+    if (e.target === imprintOverlay) imprintOverlay.classList.add('hidden');
+  });
+
   // ── Support banner dismiss ──
   document.getElementById('store-cta-dismiss').addEventListener('click', () => {
     document.getElementById('store-cta-wrapper').classList.add('store-cta-hidden');
@@ -675,6 +685,7 @@ function wireEvents() {
       if (placeOnFaceActive) togglePlaceOnFace(false);
       if (exclusionTool) setExclusionTool(null);
       licenseOverlay.classList.add('hidden');
+      imprintOverlay.classList.add('hidden');
     }
   });
 }

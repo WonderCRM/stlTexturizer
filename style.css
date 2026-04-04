@@ -1068,6 +1068,38 @@ input[type="number"].val:focus { outline: none; border-color: var(--accent); }
   text-decoration: underline;
 }
 
+/* ── Imprint modal extras ────────────────────────────────────────────────── */
+.imprint-modal {
+  max-width: 520px;
+  max-height: 85vh;
+  overflow-y: auto;
+}
+
+.imprint-section-heading {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 6px 0 0;
+}
+
+.imprint-text {
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.6;
+  margin: 0;
+}
+
+.imprint-text a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.imprint-text a:hover {
+  text-decoration: underline;
+}
+
 .license-close-btn {
   position: absolute;
   top: 14px;
