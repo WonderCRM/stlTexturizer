@@ -107,6 +107,10 @@ export const TRANSLATIONS = {
     'precision.refining': 'Refining\u2026',
     'precision.warningBody': 'Estimated ~{n} triangles. This may slow down your browser. Continue?',
 
+    // Boundary falloff
+    'labels.boundaryFalloff':          'Boundary Falloff \u24d8',
+    'tooltips.boundaryFalloff':        'Gradually reduces displacement to zero near masked boundaries, preventing triangle overlap where textured and non-textured regions meet.',
+
     // Symmetric displacement
     'labels.symmetricDisplacement': 'Symmetric displacement \u24d8',
     'tooltips.symmetricDisplacement': 'When on, 50% grey = no displacement; white pushes out, black pushes in. Keeps part volume roughly constant.',
@@ -293,6 +297,10 @@ export const TRANSLATIONS = {
     'precision.refining': 'Wird verfeinert\u2026',
     'precision.warningBody': 'Gesch\u00e4tzt ~{n} Dreiecke. Dies kann den Browser verlangsamen. Fortfahren?',
 
+    // Boundary falloff
+    'labels.boundaryFalloff':          'Rand\u00fcbergang \u24d8',
+    'tooltips.boundaryFalloff':        'Reduziert die Verschiebung schrittweise auf Null nahe maskierter Grenzen, um Dreiecks\u00fcberschneidungen an \u00dcberg\u00e4ngen zu vermeiden.',
+
     // Symmetric displacement
     'labels.symmetricDisplacement': 'Symmetrische Verschiebung \u24d8',
     'tooltips.symmetricDisplacement': 'Wenn aktiv: 50% Grau = keine Verschiebung; Weiß nach außen, Schwarz nach innen. H\u00e4lt das Volumen des Teils in etwa konstant.',
@@ -478,6 +486,10 @@ export const TRANSLATIONS = {
     'precision.triCount': '{n} \u25b3',
     'precision.refining': 'Raffinamento\u2026',
     'precision.warningBody': 'Stima ~{n} triangoli. Ciò potrebbe rallentare il browser. Continuare?',
+
+    // Boundary falloff
+    'labels.boundaryFalloff':          'Sfumatura bordo \u24d8',
+    'tooltips.boundaryFalloff':        'Riduce gradualmente la deformazione a zero vicino ai bordi mascherati, impedendo sovrapposizioni di triangoli tra zone con e senza texture.',
 
     // Symmetric displacement
     'labels.symmetricDisplacement': 'Deformazione simmetrica \u24d8',
