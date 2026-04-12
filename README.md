@@ -8,6 +8,15 @@ A browser-based tool for applying surface displacement textures to 3D meshes —
 
 Load an STL, OBJ, or 3MF file, pick a texture, tune the parameters, and export a new displaced STL ready for slicing.
 
+## Recent Updates
+
+- Smooth masking borders
+- New languages: Italian, Spanish, Portuguese, Japanese, French
+- 2–3× speed improvement
+- 3MF export
+- Mouse-wheel fine tuning of values
+- Quality of life improvements
+
 ## Features
 
 ### Textures
@@ -142,11 +151,19 @@ Open http://localhost:8000 in your browser and you're ready to go.
 
 ## Dependencies
 
-Loaded via CDN — no build step needed:
+Loaded via CDN ([jsDelivr](https://www.jsdelivr.com/)) — no build step or npm install needed:
 
-- [Three.js](https://threejs.org/) v0.170.0 (including STLLoader, OBJLoader, OrbitControls, etc.)
-- [fflate](https://github.com/101arrowz/fflate) v0.8.2 — ZIP decompression for .3mf files
+| Library | Version | License | Usage |
+|---------|---------|---------|-------|
+| [Three.js](https://threejs.org/) | 0.170.0 | MIT | 3D rendering, scene management, materials |
+| — [OrbitControls](https://threejs.org/docs/#examples/en/controls/OrbitControls) | 0.170.0 | MIT | Camera orbit / pan / zoom |
+| — [STLLoader](https://threejs.org/docs/#examples/en/loaders/STLLoader) | 0.170.0 | MIT | Binary & ASCII STL import |
+| — [OBJLoader](https://threejs.org/docs/#examples/en/loaders/OBJLoader) | 0.170.0 | MIT | OBJ mesh import |
+| — [LineSegments2 / LineSegmentsGeometry / LineMaterial](https://threejs.org/docs/#examples/en/lines/LineSegments2) | 0.170.0 | MIT | Wide-line wireframe overlay |
+| [fflate](https://github.com/101arrowz/fflate) | 0.8.2 | MIT | ZIP compression & decompression for 3MF import/export |
+
+All dependencies are MIT-licensed.
 
 ## License
 
-GNU GPL v3.0 — see [LICENSE](LICENSE).
+GNU AGPL v3.0 — see [LICENSE](LICENSE).

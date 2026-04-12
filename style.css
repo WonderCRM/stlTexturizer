@@ -444,6 +444,45 @@ main {
 
 .preset-swatch:hover .preset-label { opacity: 1; }
 
+/* ── Preset loading states ────────────────────────────────────────────── */
+
+@keyframes preset-swatch-shimmer {
+  0%   { opacity: .15; }
+  50%  { opacity: .30; }
+  100% { opacity: .15; }
+}
+
+.preset-swatch.preset-loading canvas {
+  background: var(--border);
+  animation: preset-swatch-shimmer 1.2s ease-in-out infinite;
+}
+
+.preset-swatch.preset-loading-full::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,.35);
+  border-radius: var(--radius);
+  pointer-events: none;
+}
+
+@keyframes spin-loader {
+  to { transform: translate(-50%,-50%) rotate(360deg); }
+}
+
+.preset-swatch.preset-loading-full::before {
+  content: '';
+  position: absolute;
+  top: 50%; left: 50%;
+  width: 20px; height: 20px;
+  border: 2px solid rgba(255,255,255,.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  transform: translate(-50%,-50%);
+  animation: spin-loader .6s linear infinite;
+  z-index: 1;
+}
+
 /* ── Custom upload button ─────────────────────────────────────────────── */
 .upload-btn {
   display: inline-flex;
@@ -481,7 +520,8 @@ main {
 
 .form-row:last-child { margin-bottom: 0; }
 
-.form-row label {
+.form-row label,
+.form-row .form-row-label {
   flex: 0 0 80px;
   font-size: 12px;
   color: var(--text);
@@ -635,6 +675,17 @@ input[type="number"].val:focus { outline: none; border-color: var(--accent); }
 .export-btn:hover:not(:disabled) { background: var(--accent-hover); }
 .export-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .export-btn.busy { opacity: 0.7; pointer-events: none; }
+
+/* Row containing Export STL and Export 3MF side-by-side */
+.export-buttons {
+  display: flex;
+  gap: 8px;
+}
+.export-buttons .export-btn {
+  flex: 1 1 0;
+  width: auto;
+  min-width: 0;
+}
 /* ── Lock / proportional-scale button ───────────────────────────────────── */
 .lock-btn {
   flex-shrink: 0;
@@ -709,6 +760,29 @@ input[type="number"].val:focus { outline: none; border-color: var(--accent); }
   border-color: var(--danger);
   outline: 1px solid var(--danger);
   color: var(--danger);
+}
+
+/* ── Resolution too coarse warning ────────────────────────────────────────── */
+.resolution-warning {
+  background: color-mix(in srgb, #f59e0b 15%, var(--surface2));
+  border: 1px solid #f59e0b;
+  color: #f59e0b;
+  border-radius: var(--radius);
+  padding: 6px 10px;
+  font-size: 11px;
+  line-height: 1.4;
+  margin-top: 4px;
+  margin-bottom: 8px;
+}
+
+.resolution-warning.hidden { display: none; }
+
+/* Orange highlight on slider + number input when resolution is too coarse */
+#refine-length.res-warn, #refine-length-val.res-warn {
+  accent-color: #f59e0b;
+  border-color: #f59e0b;
+  outline: 1px solid #f59e0b;
+  color: #f59e0b;
 }
 
 /* ── Surface Exclusions panel ────────────────────────────────────────────── */
@@ -979,6 +1053,11 @@ input[type="number"].val:focus { outline: none; border-color: var(--accent); }
   background: #009cde;
 }
 .sponsor-link--paypal:hover { background: #007bb5; }
+
+.sponsor-link--kofi {
+  background: #ff5e5b;
+}
+.sponsor-link--kofi:hover { background: #e04e4b; }
 
 .sponsor-no-show {
   display: flex;

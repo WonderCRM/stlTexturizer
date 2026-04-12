@@ -26,6 +26,7 @@
     }
   }
   </script>
+  <link rel="modulepreload" href="https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js">
 </head>
 <body>
   <header>
@@ -66,7 +67,7 @@
         <div id="brush-cursor"></div>
         <div id="store-cta-wrapper">
           <span id="store-cta">
-            <span data-i18n-html="cta.store">Support this tool? Shop at <a href="https://geni.us/CNCStoreTexture" target="_blank" rel="noopener noreferrer">CNCKitchen.STORE</a> or donate on <a href="https://www.paypal.me/CNCKitchen" target="_blank" rel="noopener noreferrer">PayPal</a></span><button id="store-cta-dismiss" aria-label="Dismiss">&times;</button>
+            <span data-i18n-html="cta.store">Support this tool? Shop at <a href="https://geni.us/CNCStoreTexture" target="_blank" rel="noopener noreferrer">CNCKitchen.STORE</a> or donate on <a href="https://www.paypal.me/CNCKitchen" target="_blank" rel="noopener noreferrer">PayPal</a> / <a href="https://ko-fi.com/cnckitchen" target="_blank" rel="noopener noreferrer">Ko-fi</a></span><button id="store-cta-dismiss" aria-label="Dismiss">&times;</button>
           </span>
         </div>
       </div>
@@ -162,7 +163,7 @@
       <section class="panel-section">
         <h2 data-i18n="sections.displacement">Displacement</h2>
         <div class="form-row slider-row">
-          <label for="amplitude" data-i18n="labels.amplitude">Amplitude</label>
+          <label for="amplitude" data-i18n="labels.amplitude">Amplitude (mm)</label>
           <input type="range" id="amplitude" min="-2" max="2" step="0.01" value="0.5" />
           <input type="number" class="val" id="amplitude-val" value="0.5" min="-100" max="100" step="0.01" data-wheel-decimals="2" />
         </div>
@@ -310,8 +311,8 @@
 
         <!-- Brush type switcher (shown only when Brush is active) -->
         <div id="excl-brush-type-row" class="form-row hidden">
-          <label data-i18n="labels.type">Type</label>
-          <div class="excl-seg">
+          <span id="excl-brush-type-label" class="form-row-label" data-i18n="labels.type">Type</span>
+          <div class="excl-seg" role="group" aria-labelledby="excl-brush-type-label">
             <button id="excl-brush-single" class="excl-seg-btn active" data-i18n="brushType.single">Single</button>
             <button id="excl-brush-radius-btn" class="excl-seg-btn" data-i18n="brushType.circle">Circle</button>
           </div>
@@ -343,9 +344,12 @@
       <section class="panel-section">
         <h2 data-i18n="sections.export" data-i18n-title="tooltips.export" title="Smaller edge length = finer displacement detail. Output is then decimated to the triangle limit.">Export ⓘ</h2>
         <div class="form-row slider-row">
-          <label for="refine-length" data-i18n="labels.resolution" data-i18n-title="tooltips.resolution" title="Edges longer than this value will be split during export">Resolution</label>
-          <input type="range" id="refine-length" min="0.01" max="5" step="0.01" value="1" />
+          <label for="refine-length" data-i18n="labels.resolution" data-i18n-title="tooltips.resolution" title="Edges longer than this value will be split during export">Resolution (mm)</label>
+          <input type="range" id="refine-length" min="0.01" max="2" step="0.01" value="1" />
           <input type="number" class="val" id="refine-length-val" value="1" min="0.01" max="100" step="0.01" data-wheel-decimals="2" />
+        </div>
+        <div id="resolution-warning" class="resolution-warning hidden" data-i18n="warnings.resolutionTooCoarse">
+          ⚠ Resolution is coarser than 1/100 of the model's bounding box diagonal — fine details will be lost. Lower the value for finer results.
         </div>
         <div class="form-row slider-row">
           <label for="max-triangles" data-i18n="labels.outputTriangles" data-i18n-title="tooltips.outputTriangles" title="Mesh is fully subdivided first, then decimated down to this count">Output Triangles</label>
@@ -363,7 +367,10 @@
           </div>
           <span id="export-progress-label" data-i18n="progress.processing">Processing…</span>
         </div>
-        <button id="export-btn" class="export-btn" disabled data-i18n="ui.exportStl">Export STL</button>
+        <div class="export-buttons">
+          <button id="export-btn" class="export-btn" disabled data-i18n="ui.exportStl" data-i18n-title="tooltips.exportStl" title="Widely compatible with all slicers">Export STL</button>
+          <button id="export-3mf-btn" class="export-btn" disabled data-i18n="ui.export3mf" data-i18n-title="tooltips.export3mf" title="Smaller file size — may not be accepted by all slicers">Export 3MF</button>
+        </div>
       </section>
 
       <button id="license-link" class="license-link" data-i18n="license.btn">License &amp; Terms</button>
@@ -384,7 +391,7 @@
         <li data-i18n-html="license.item5"><strong>No support</strong> is provided. The author is under no obligation to fix bugs, answer questions, or update this tool. That said, bug reports and feature requests are always welcome at <a href="mailto:texturizer@cnckitchen.com">texturizer@cnckitchen.com</a>.</li>
         <li data-i18n-html="license.item6">The author shall not be held <strong>liable</strong> for any damages, data loss, or issues arising from the use of this tool.</li>
         <li data-i18n-html="license.item7">Want to license or embed this tool for your own business or website? Contact us at <a href="mailto:contact@cnckitchen.com">contact@cnckitchen.com</a>.</li>
-        <li data-i18n-html="license.item3">Support this tool? Shop at <a href="https://geni.us/CNCStoreTexture" target="_blank" rel="noopener">CNCKitchen.STORE</a> or donate on <a href="https://www.paypal.me/CNCKitchen" target="_blank" rel="noopener">PayPal</a>.</li>
+        <li data-i18n-html="license.item3">Support this tool? Shop at <a href="https://geni.us/CNCStoreTexture" target="_blank" rel="noopener">CNCKitchen.STORE</a> or donate on <a href="https://www.paypal.me/CNCKitchen" target="_blank" rel="noopener">PayPal</a> / <a href="https://ko-fi.com/cnckitchen" target="_blank" rel="noopener">Ko-fi</a>.</li>
         <li data-i18n-html="license.item8">Source code available on <a href="https://github.com/CNCKitchen/stlTexturizer" target="_blank" rel="noopener">GitHub</a>.</li>
       </ul>
     </div>
@@ -407,7 +414,7 @@
         <li data-i18n-html="imprint.privacyHosting">This website is hosted on <strong>GitHub Pages</strong> (GitHub Inc. / Microsoft Corp., 88 Colin P Kelly Jr St, San Francisco, CA 94107, USA). When you visit this site, GitHub may process your IP address in server logs. Legal basis: Art. 6(1)(f) DSGVO (legitimate interest in providing the website). See <a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement" target="_blank" rel="noopener">GitHub&rsquo;s Privacy Statement</a>.</li>
         <li data-i18n-html="imprint.privacyLocal">This tool stores user preferences (language, theme) in your browser&rsquo;s <strong>localStorage</strong>. This data never leaves your device and is not transmitted to any server.</li>
         <li data-i18n-html="imprint.privacyNoCookies">This website does <strong>not</strong> use cookies, analytics, or any tracking technologies.</li>
-        <li data-i18n-html="imprint.privacyExternal">This site contains links to external websites (e.g., CNCKitchen.STORE, PayPal). These sites have their own privacy policies, over which we have no control.</li>
+        <li data-i18n-html="imprint.privacyExternal">This site contains links to external websites (e.g., CNCKitchen.STORE, PayPal, Ko-fi). These sites have their own privacy policies, over which we have no control.</li>
         <li data-i18n-html="imprint.privacyRights">Under the GDPR you have the right to <strong>access, rectification, erasure, restriction of processing, data portability</strong>, and the right to <strong>lodge a complaint</strong> with a supervisory authority.</li>
       </ul>
     </div>
@@ -424,6 +431,9 @@
       </a>
       <a href="https://www.paypal.me/CNCKitchen" target="_blank" rel="noopener noreferrer" class="sponsor-link sponsor-link--paypal" data-i18n="sponsor.donate">
         💙 Donate on PayPal
+      </a>
+      <a href="https://ko-fi.com/cnckitchen" target="_blank" rel="noopener noreferrer" class="sponsor-link sponsor-link--kofi" data-i18n="sponsor.donateKofi">
+        ☕ Support on Ko-fi
       </a>
       <label class="sponsor-no-show">
         <input type="checkbox" id="sponsor-dont-show" />

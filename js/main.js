@@ -4,12 +4,12 @@ import { initViewer, loadGeometry, setMeshMaterial, setMeshGeometry, setWirefram
          setExclusionOverlay, setHoverPreview, setViewerTheme,
          setProjection, requestRender } from './viewer.js';
 import { loadModelFile, computeBounds, getTriangleCount }  from './stlLoader.js';
-import { loadPresets, loadCustomTexture }  from './presetTextures.js';
+import { loadAllThumbnails, loadFullPreset, loadCustomTexture, IMAGE_PRESETS }  from './presetTextures.js';
 import { createPreviewMaterial, updateMaterial } from './previewMaterial.js';
 import { subdivide }          from './subdivision.js';
 import { applyDisplacement }  from './displacement.js';
 import { decimate }           from './decimation.js';
-import { exportSTL }          from './exporter.js';
+import { exportSTL, export3MF } from './exporter.js';
 import { buildAdjacency, bucketFill,
          buildExclusionOverlayGeo, buildFaceWeights } from './exclusion.js';
 import { t, initLang, setLang, getLang, applyTranslations, TRANSLATIONS } from './i18n.js';
@@ -50,6 +50,11 @@ let _shiftLineMesh     = null;        // THREE.Line — preview line from last p
 let _lastEffectiveTexture = null;
 let _effectiveMapCache    = null;
 let _effectiveMapCacheKey = null;
+
+// ── Spatial grid state (must precede loadDefaultCube call) ────────────────────
+let _spatialGrid = null;
+let _spatialCellSize = 0;
+let _spatialMinX = 0, _spatialMinY = 0, _spatialMinZ = 0;
 
 const settings = {
   mappingMode:   5,     // Triplanar default
@@ -160,6 +165,14 @@ let dispPreviewGeometry  = null;   // subdivided geometry with smoothNormal attr
 let dispPreviewBusy      = false;  // true while async subdivision is running
 let dispPreviewParentMap = null;   // Int32Array: subdivided face → original face index
 
+// ── Operation tokens (stale-result guards) ────────────────────────────────────
+// Each async operation captures the current token at start and checks it after
+// every await. When a new model loads all tokens are incremented, causing any
+// in-flight operation to silently abort rather than apply results to new state.
+let precisionToken   = 0;
+let dispPreviewToken = 0;
+let exportToken      = 0;
+
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 
 const canvas         = document.getElementById('viewport');
@@ -172,6 +185,7 @@ const presetGrid     = document.getElementById('preset-grid');
 const activeMapName  = document.getElementById('active-map-name');
 const meshInfo       = document.getElementById('mesh-info');
 const exportBtn        = document.getElementById('export-btn');
+const export3mfBtn     = document.getElementById('export-3mf-btn');
 const exportProgress   = document.getElementById('export-progress');
 const exportProgBar    = document.getElementById('export-progress-bar');
 const exportProgPct    = document.getElementById('export-progress-pct');
@@ -200,6 +214,7 @@ const rotationVal    = document.getElementById('rotation-val');
 const amplitudeVal      = document.getElementById('amplitude-val');
 const amplitudeWarning  = document.getElementById('amplitude-warning');
 const refineLenVal = document.getElementById('refine-length-val');
+const resolutionWarning = document.getElementById('resolution-warning');
 const maxTriVal    = document.getElementById('max-triangles-val');
 
 const bottomAngleLimitSlider = document.getElementById('bottom-angle-limit');
@@ -263,11 +278,11 @@ const languageSelector = document.querySelector('.lang-seg');
 // Middle position 500 → scale ~0.71 (log midpoint between 0.05 and 10).
 const _LOG_MIN = Math.log(0.05);
 const _LOG_MAX = Math.log(10);
-const scaleToPos = v => Math.round((Math.log(Math.max(0.05, Math.min(10, v))) - _LOG_MIN) / (_LOG_MAX - _LOG_MIN) * 1000);
+const scaleToPos = v => Math.round(Math.max(0, Math.min(1000, (Math.log(Math.max(0.01, Math.min(10, v))) - _LOG_MIN) / (_LOG_MAX - _LOG_MIN) * 1000)));
 const posToScale = p => parseFloat(Math.exp(_LOG_MIN + (p / 1000) * (_LOG_MAX - _LOG_MIN)).toFixed(2));
 
 function _applyScaleU(v) {
-  v = Math.max(0.05, Math.min(10, v));
+  v = Math.max(0.01, Math.min(10, v));
   settings.scaleU = v;
   scaleUSlider.value = scaleToPos(v);
   scaleUVal.value = v;
@@ -291,6 +306,9 @@ function populateLanguageSelector() {
 
   const select = document.createElement('select');
   select.className = 'lang-dropdown';
+  select.id = 'lang-select';
+  select.name = 'lang-select';
+  select.setAttribute('aria-label', 'Select language');
 
   for (const langKey in TRANSLATIONS) {
     const opt = document.createElement('option');
@@ -301,7 +319,13 @@ function populateLanguageSelector() {
   }
 
   select.addEventListener('change', async (e) => {
-    await setLang(e.target.value);
+    const ok = await setLang(e.target.value);
+    if (!ok) {
+      // Revert the dropdown to the language that is actually active
+      select.value = getLang();
+      alert('Could not load the selected language. Please check your connection and try again.');
+      return;
+    }
 
     // Re-translate <option> elements (innerHTML won't reach these)
     document.querySelectorAll('#mapping-mode option[data-i18n-opt]').forEach(opt => {
@@ -310,6 +334,12 @@ function populateLanguageSelector() {
 
     // Refresh dynamic count text to current language
     if (currentGeometry) {
+      const triCount = getTriangleCount(currentGeometry);
+      const mb = ((currentGeometry.attributes.position.array.byteLength) / 1024 / 1024).toFixed(2);
+      const sx = currentBounds.size.x.toFixed(2);
+      const sy = currentBounds.size.y.toFixed(2);
+      const sz = currentBounds.size.z.toFixed(2);
+      meshInfo.textContent = t('ui.meshInfo', { n: triCount.toLocaleString(), mb, sx, sy, sz });
       refreshExclusionOverlay();
     }
   });
@@ -319,7 +349,18 @@ function populateLanguageSelector() {
 populateLanguageSelector();
 
 // Initialise language (reads localStorage / browser preference, applies translations)
-await initLang();
+{
+  const { enFailed } = await initLang();
+  if (enFailed) {
+    // English base strings failed — the UI will show raw keys. Surface a plain
+    // English message since t() won't work reliably at this point.
+    console.error('[i18n] English language file failed to load — UI text will be missing');
+    const banner = document.createElement('div');
+    banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#c0392b;color:#fff;padding:10px 16px;font-family:sans-serif;font-size:14px;text-align:center';
+    banner.textContent = 'Warning: language files could not be loaded. The interface may show missing text. Check your network connection and reload the page.';
+    document.body.prepend(banner);
+  }
+}
 
 // Sync lang dropdown to current language
 (function() {
@@ -343,45 +384,57 @@ wireEvents();
 scaleUVal.value = posToScale(parseFloat(scaleUSlider.value));
 scaleVVal.value = posToScale(parseFloat(scaleVSlider.value));
 
-loadPresets().then(presets => {
-  PRESETS = presets;
-  buildPresetGrid();
-  loadDefaultCube();
-  // Select Crystal as the default preset
-  const noiseIdx = PRESETS.findIndex(p => p.name === 'Crystal');
-  const defaultIdx = noiseIdx !== -1 ? noiseIdx : 0;
-  const swatches = presetGrid.querySelectorAll('.preset-swatch');
-  if (swatches[defaultIdx]) selectPreset(defaultIdx, swatches[defaultIdx]);
-}).catch(err => console.error('Failed to load preset textures:', err));
+// Load geometry immediately — don't wait for textures
+loadDefaultCube();
+
+// Build swatches with placeholder canvases, then load thumbnails
+const DEFAULT_PRESET_NAME = 'Crystal';
+const _presetSwatches = IMAGE_PRESETS.map((p, idx) => {
+  const swatch = document.createElement('div');
+  swatch.className = 'preset-swatch preset-loading';
+  swatch.setAttribute('role', 'button');
+  swatch.setAttribute('tabindex', '0');
+  swatch.title = p.name;
+
+  const placeholder = document.createElement('canvas');
+  placeholder.width = 80; placeholder.height = 80;
+  swatch.appendChild(placeholder);
+
+  const label = document.createElement('span');
+  label.className = 'preset-label';
+  label.textContent = p.name;
+  swatch.appendChild(label);
+
+  swatch.addEventListener('click', () => selectPreset(idx, swatch));
+  swatch.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      selectPreset(idx, swatch);
+    }
+  });
+  presetGrid.appendChild(swatch);
+  return swatch;
+});
+
+// Load lightweight thumbnails (~49 KB total), then auto-select Crystal
+loadAllThumbnails().then(thumbs => {
+  thumbs.forEach((thumb, idx) => {
+    if (!thumb) return;
+    PRESETS[idx] = thumb;         // thumbnail-only entry for now
+    const swatch = _presetSwatches[idx];
+    if (!swatch) return;
+    swatch.classList.remove('preset-loading');
+    const placeholder = swatch.querySelector('canvas');
+    swatch.replaceChild(thumb.thumbCanvas, placeholder);
+  });
+  // Auto-select the default preset
+  const crystalIdx = IMAGE_PRESETS.findIndex(p => p.name === DEFAULT_PRESET_NAME);
+  if (crystalIdx >= 0 && PRESETS[crystalIdx]) {
+    selectPreset(crystalIdx, _presetSwatches[crystalIdx]);
+  }
+}).catch(err => console.error('Failed to load thumbnails:', err));
 
 // ── Preset grid ───────────────────────────────────────────────────────────────
-
-function buildPresetGrid() {
-  PRESETS.forEach((preset, idx) => {
-    const swatch = document.createElement('div');
-    swatch.className = 'preset-swatch';
-    swatch.setAttribute('role', 'button');
-    swatch.setAttribute('tabindex', '0');
-    swatch.title = preset.name;
-
-    // Use the small thumbnail canvas
-    swatch.appendChild(preset.thumbCanvas);
-
-    const label = document.createElement('span');
-    label.className = 'preset-label';
-    label.textContent = preset.name;
-    swatch.appendChild(label);
-
-    swatch.addEventListener('click', () => selectPreset(idx, swatch));
-    swatch.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        selectPreset(idx, swatch);
-      }
-    });
-    presetGrid.appendChild(swatch);
-  });
-}
 
 function resetTextureSmoothing() {
   settings.textureSmoothing = 0;
@@ -389,14 +442,39 @@ function resetTextureSmoothing() {
   textureSmoothingVal.value    = 0;
 }
 
-function selectPreset(idx, swatchEl) {
+let _selectGeneration = 0;   // debounce rapid preset clicks
+
+async function selectPreset(idx, swatchEl) {
+  const gen = ++_selectGeneration;
   document.querySelectorAll('.preset-swatch').forEach(s => s.classList.remove('active'));
   swatchEl.classList.add('active');
-  activeMapEntry = PRESETS[idx];
-  activeMapName.textContent = PRESETS[idx].name;
+
+  const entry = PRESETS[idx];
+  if (!entry) return;
+  activeMapName.textContent = entry.name;
   resetTextureSmoothing();
-  if (activeMapEntry.defaultScale != null) _applyScaleU(activeMapEntry.defaultScale);
-  updatePreview();
+  if (entry.defaultScale != null) _applyScaleU(entry.defaultScale);
+
+  // If full texture is already loaded, use it directly
+  if (entry.texture) {
+    activeMapEntry = entry;
+    updatePreview();
+    return;
+  }
+
+  // Load full-resolution texture on demand
+  swatchEl.classList.add('preset-loading-full');
+  try {
+    const full = await loadFullPreset(idx);
+    if (gen !== _selectGeneration) return;   // user clicked another preset meanwhile
+    PRESETS[idx] = { ...entry, ...full };
+    activeMapEntry = PRESETS[idx];
+    swatchEl.classList.remove('preset-loading-full');
+    updatePreview();
+  } catch (err) {
+    console.error('Failed to load full texture:', err);
+    swatchEl.classList.remove('preset-loading-full');
+  }
 }
 
 // ── Accessibility: Modal focus trap ───────────────────────────────────────────
@@ -483,7 +561,7 @@ function wireEvents() {
 
   // Scale V — when lock is on, mirror to U
   const applyScaleV = (v) => {
-    v = Math.max(0.05, Math.min(10, v));
+    v = Math.max(0.01, Math.min(10, v));
     settings.scaleV = v;
     scaleVSlider.value = scaleToPos(v);
     scaleVVal.value = v;
@@ -514,7 +592,8 @@ function wireEvents() {
   linkSlider(amplitudeSlider, amplitudeVal, v => { settings.amplitude = v; checkAmplitudeWarning(); return v.toFixed(2); });
   amplitudeVal.addEventListener('change', checkAmplitudeWarning);
   linkSlider(boundaryFalloffSlider, boundaryFalloffVal, v => { settings.boundaryFalloff = v; _falloffDirty = true; return v.toFixed(1); });
-  linkSlider(refineLenSlider, refineLenVal, v => { settings.refineLength  = v; return v.toFixed(2); }, false);
+  linkSlider(refineLenSlider, refineLenVal, v => { settings.refineLength  = v; checkResolutionWarning(); return v.toFixed(2); }, false);
+  refineLenVal.addEventListener('change', checkResolutionWarning);
   linkSlider(maxTriSlider, maxTriVal, v => { settings.maxTriangles = v; return formatM(v); }, false);
   linkSlider(bottomAngleLimitSlider, bottomAngleLimitVal, v => { settings.bottomAngleLimit = v; _falloffDirty = true; return v; });
   linkSlider(topAngleLimitSlider,    topAngleLimitVal,    v => { settings.topAngleLimit    = v; _falloffDirty = true; return v; });
@@ -556,9 +635,9 @@ function wireEvents() {
   });
 
   // ── Export ──
-  exportBtn.addEventListener('click', () => {
+  const startExport = (format) => {
     if (sessionStorage.getItem('stlt-no-sponsor') === '1') {
-      handleExport();
+      handleExport(format);
       return;
     }
     const overlay = document.getElementById('sponsor-overlay');
@@ -572,13 +651,15 @@ function wireEvents() {
         sessionStorage.setItem('stlt-no-sponsor', '1');
       }
       overlay.classList.add('hidden');
-      handleExport();
+      handleExport(format);
     };
 
     closeBtn.onclick = dismiss;
     // Also start processing when the user clicks through to the store
     storeLink.onclick = () => setTimeout(dismiss, 150);
-  });
+  };
+  exportBtn.addEventListener('click', () => startExport('stl'));
+  export3mfBtn.addEventListener('click', () => startExport('3mf'));
 
   // ── Wireframe ──
   wireframeToggle.addEventListener('change', () => setWireframe(wireframeToggle.checked));
@@ -969,9 +1050,6 @@ function distSqPointToTri(px, py, pz, ax, ay, az, bx, by, bz, cx, cy, cz) {
 }
 
 // ── Spatial grid for fast sphere queries ──────────────────────────────────
-let _spatialGrid = null;
-let _spatialCellSize = 0;
-let _spatialMinX = 0, _spatialMinY = 0, _spatialMinZ = 0;
 
 function buildSpatialGrid(centroids, triCount, bounds) {
   const vol = bounds.size.x * bounds.size.y * bounds.size.z;
@@ -1237,6 +1315,7 @@ function handlePlaceOnFaceClick(e) {
   // Now reload as if this were a freshly loaded STL
   currentBounds = computeBounds(currentGeometry);
   checkAmplitudeWarning();
+  checkResolutionWarning();
 
   // Dispose old preview material so it gets fully recreated
   if (previewMaterial) {
@@ -1286,6 +1365,7 @@ function handlePlaceOnFaceClick(e) {
   settings.refineLength = defaultEdge;
   refineLenSlider.value = defaultEdge;
   refineLenVal.value = defaultEdge;
+  checkResolutionWarning();
 
   // Update mesh info
   const triCount = getTriangleCount(currentGeometry);
@@ -1296,6 +1376,7 @@ function handlePlaceOnFaceClick(e) {
   meshInfo.textContent = t('ui.meshInfo', { n: triCount.toLocaleString(), mb, sx, sy, sz });
 
   exportBtn.disabled = (activeMapEntry === null);
+  export3mfBtn.disabled = (activeMapEntry === null);
   updatePreview();
 
   // Rebuild exclusion overlay with new vertex positions (face indices unchanged)
@@ -1481,13 +1562,28 @@ function addFineWheelSupport(input, applyFn) {
     if (input.disabled || input.readOnly) return;
     e.preventDefault();
     input.focus({ preventScroll: true });
+
     const precision = getInputPrecision(input);
-    const step = precision <= 0 ? 1 : 1 / (10 ** precision);
+
+    let step = precision <= 0 ? 1 : 1 / (10 ** precision);
+
+   
+    if (e.shiftKey) {
+      step *= 10;        // faster
+    } else if (e.ctrlKey || e.metaKey) {
+      step *= 0.1;       // ultra fine 
+    }
+
     const current = parseFloat(input.value);
     const fallback = parseFloat(input.defaultValue || input.min || '0');
     const base = isNaN(current) ? (isNaN(fallback) ? 0 : fallback) : current;
+
     const direction = e.deltaY < 0 ? 1 : -1;
-    const next = clampToInputBounds(input, roundToPrecision(base + direction * step, precision));
+    const next = clampToInputBounds(
+      input,
+      roundToPrecision(base + direction * step, precision + 2) 
+    );
+
     applyFn(next);
   }, { passive: false });
 }
@@ -1535,8 +1631,8 @@ function linkSlider(slider, valInput, onChangeFn, livePreview = true) {
 }
 
 function formatM(n) {
-  return n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')} M`
-       : n >= 1_000    ? `${(n / 1_000).toFixed(1).replace(/\.0$/, '')} k`
+  return n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)} M`
+       : n >= 1_000    ? `${(n / 1_000).toFixed(0)} k`
        : String(n);
 }
 
@@ -1548,6 +1644,11 @@ function loadDefaultCube() {
   const geo = new THREE.BoxGeometry(50, 50, 50).toNonIndexed();
   geo.computeBoundingBox();
   geo.computeVertexNormals();
+
+  // Invalidate any in-flight async operations tied to the previous model
+  precisionToken++;
+  dispPreviewToken++;
+  exportToken++;
 
   currentGeometry = geo;
   currentBounds   = computeBounds(geo);
@@ -1595,6 +1696,7 @@ function loadDefaultCube() {
   settings.refineLength = defaultEdge;
   refineLenSlider.value = defaultEdge;
   refineLenVal.value = defaultEdge;
+  checkResolutionWarning();
 
   const triCount = getTriangleCount(geo);
   const mb = ((geo.attributes.position.array.byteLength) / 1024 / 1024).toFixed(2);
@@ -1604,16 +1706,31 @@ function loadDefaultCube() {
   meshInfo.textContent = t('ui.meshInfo', { n: triCount.toLocaleString(), mb, sx, sy, sz });
 
   exportBtn.disabled = (activeMapEntry === null);
+  export3mfBtn.disabled = (activeMapEntry === null);
   updatePreview();
 }
 
 async function handleModelFile(file) {
   try {
-    const { geometry, bounds } = await loadModelFile(file);
+    const { geometry, bounds, nanCount, degenerateCount } = await loadModelFile(file);
+
+    // Invalidate any in-flight async operations tied to the previous model
+    precisionToken++;
+    dispPreviewToken++;
+    exportToken++;
+
     currentGeometry = geometry;
     currentBounds   = bounds;
     currentStlName  = file.name.replace(/\.(stl|obj|3mf)$/i, '');
     checkAmplitudeWarning();
+
+    // Log (but don't block the user with an alert) if bad triangles were
+    // silently removed during load — this is non-critical; the all-invalid
+    // case is already thrown as an error by validateAndCleanGeometry.
+    const removedCount = (nanCount ?? 0) + (degenerateCount ?? 0);
+    if (removedCount > 0) {
+      console.warn(`Removed ${nanCount} NaN and ${degenerateCount} degenerate triangles at load time`);
+    }
 
     // Dispose old preview material and reset state for the new mesh
     if (previewMaterial) {
@@ -1623,10 +1740,11 @@ async function handleModelFile(file) {
 
     // Auto-select first preset on first load
     if (!activeMapEntry && PRESETS.length > 0) {
-      activeMapEntry = PRESETS[0];
-      activeMapName.textContent = PRESETS[0].name;
-      const swatches = document.querySelectorAll('.preset-swatch');
-      if (swatches.length > 0) swatches[0].classList.add('active');
+      const idx = PRESETS.findIndex(p => p != null);
+      if (idx >= 0) {
+        const swatches = document.querySelectorAll('.preset-swatch');
+        if (swatches[idx]) selectPreset(idx, swatches[idx]);
+      }
     }
     mappingSelect.value = String(settings.mappingMode);
     capAngleRow.style.display = settings.mappingMode === 3 ? '' : 'none';
@@ -1696,6 +1814,7 @@ async function handleModelFile(file) {
     settings.refineLength = defaultEdge;
     refineLenSlider.value = defaultEdge;
     refineLenVal.value = defaultEdge;
+    checkResolutionWarning();
 
     const triCount = getTriangleCount(geometry);
     const mb = ((geometry.attributes.position.array.byteLength) / 1024 / 1024).toFixed(2);
@@ -1705,6 +1824,7 @@ async function handleModelFile(file) {
     meshInfo.textContent = t('ui.meshInfo', { n: triCount.toLocaleString(), mb, sx, sy, sz });
 
     exportBtn.disabled = (activeMapEntry === null);
+    export3mfBtn.disabled = (activeMapEntry === null);
     updatePreview();
   } catch (err) {
     console.error('Failed to load model:', err);
@@ -1721,6 +1841,19 @@ function checkAmplitudeWarning() {
   amplitudeWarning.classList.toggle('hidden', !danger);
   amplitudeSlider.classList.toggle('amp-danger', danger);
   amplitudeVal.classList.toggle('amp-danger', danger);
+}
+
+function checkResolutionWarning() {
+  if (!currentBounds) return;
+  const diag = Math.sqrt(
+    currentBounds.size.x ** 2 +
+    currentBounds.size.y ** 2 +
+    currentBounds.size.z ** 2
+  );
+  const tooCoarse = settings.refineLength > diag / 100;
+  resolutionWarning.classList.toggle('hidden', !tooCoarse);
+  refineLenSlider.classList.toggle('res-warn', tooCoarse);
+  refineLenVal.classList.toggle('res-warn', tooCoarse);
 }
 
 /**
@@ -2326,6 +2459,7 @@ function updatePreview() {
       previewMaterial = null;
     }
     exportBtn.disabled = true;
+    export3mfBtn.disabled = true;
     return;
   }
 
@@ -2350,6 +2484,7 @@ function updatePreview() {
 
   syncBoundaryEdgeUniforms();
   exportBtn.disabled = false;
+  export3mfBtn.disabled = false;
 }
 
 // ── Displacement preview ──────────────────────────────────────────────────────
@@ -2558,6 +2693,7 @@ async function refreshPrecisionMesh() {
     if (!confirm(msg)) return;
   }
 
+  const myToken = ++precisionToken;
   precisionBusy = true;
   precisionStatus.textContent = t('precision.refining');
   precisionOutdated.classList.add('hidden');
@@ -2566,10 +2702,12 @@ async function refreshPrecisionMesh() {
 
   try {
     await yieldFrame();
+    if (precisionToken !== myToken) return;
 
     const { geometry: subdivided, safetyCapHit, faceParentId } = await subdivide(
       currentGeometry, targetEdge, null, null, { fast: true }
     );
+    if (precisionToken !== myToken) { subdivided.dispose(); return; }
 
     // Dispose previous precision geometry if any
     if (precisionGeometry) precisionGeometry.dispose();
@@ -2721,6 +2859,7 @@ async function toggleDisplacementPreview(enable) {
   }
 
   if (dispPreviewBusy) return;
+  const myToken = ++dispPreviewToken;
   dispPreviewBusy = true;
 
   try {
@@ -2730,10 +2869,12 @@ async function toggleDisplacementPreview(enable) {
     const previewEdge = Math.max(0.1, maxDim / 80);
 
     await yieldFrame();
+    if (dispPreviewToken !== myToken) return;
 
     const { geometry: subdivided, faceParentId } = await subdivide(
       currentGeometry, previewEdge, null, null, { fast: true }
     );
+    if (dispPreviewToken !== myToken) { subdivided.dispose(); return; }
 
     addSmoothNormals(subdivided);
     addFaceNormals(subdivided);
@@ -2810,10 +2951,12 @@ function buildCombinedFaceWeights(geometry, excludedFaces, invert, settings) {
   return weights;
 }
 
-async function handleExport() {
+async function handleExport(format = 'stl') {
   if (!currentGeometry || !activeMapEntry || isExporting) return;
+  const myToken = ++exportToken;
   isExporting = true;
   exportBtn.classList.add('busy');
+  export3mfBtn.classList.add('busy');
   exportProgress.classList.remove('hidden');
 
   // If precision masking is active, bake the refined mesh before exporting
@@ -2821,9 +2964,16 @@ async function handleExport() {
     deactivatePrecisionMasking();
   }
 
+  // Hoist intermediate geometries so the finally block can always dispose them
+  let subdivided      = null;
+  let displaced       = null;
+  let finalGeometry   = null;
+  let exportSucceeded = false; // set true only after exportSTL so finally can clean up on abort/error
+
   try {
     setProgress(0.02, t('progress.subdividing'));
     await yieldFrame();
+    if (exportToken !== myToken) return;
 
     // Build per-vertex exclusion weights combining user-painted exclusion + angle masking.
     // Faces masked by top/bottom angle limits are treated the same as user-excluded faces
@@ -2834,7 +2984,8 @@ async function handleExport() {
       ? buildCombinedFaceWeights(currentGeometry, excludedFaces, selectionMode, settings)
       : null;
 
-    const { geometry: subdivided, safetyCapHit } = await subdivide(
+    let safetyCapHit;
+    ({ geometry: subdivided, safetyCapHit } = await subdivide(
       currentGeometry, settings.refineLength,
       (p, triCount, longestEdge) => {
         const label = triCount != null
@@ -2843,13 +2994,14 @@ async function handleExport() {
         setProgress(0.02 + p * 0.35, label);
       },
       faceWeights
-    );
+    ));
+    if (exportToken !== myToken) return;
 
     const subTriCount = subdivided.attributes.position.count / 3;
     setProgress(0.38, t('progress.applyingDisplacement', { n: subTriCount.toLocaleString() }));
 
     const exportEntry = getEffectiveMapEntry();
-    const displaced = await runAsync(() =>
+    displaced = await runAsync(() =>
       applyDisplacement(
         subdivided,
         exportEntry.imageData,
@@ -2860,14 +3012,17 @@ async function handleExport() {
         (p) => setProgress(0.38 + p * 0.32, t('progress.displacingVertices'))
       )
     );
+    if (exportToken !== myToken) return;
+
+    // Free subdivided geometry — displacement created a separate copy
+    subdivided.dispose();
 
     const dispTriCount = displaced.attributes.position.count / 3;
     const needsDecimation = dispTriCount > settings.maxTriangles;
     triLimitWarning.classList.toggle('hidden', !safetyCapHit);
-    // Re-apply translated warning text in case language changed since last export
     triLimitWarning.textContent = t('warnings.safetyCapHit');
 
-    let finalGeometry = displaced;
+    finalGeometry = displaced;
     if (needsDecimation) {
       setProgress(0.71, t('progress.decimatingTo', { from: dispTriCount.toLocaleString(), to: settings.maxTriangles.toLocaleString() }));
       finalGeometry = await runAsync(() =>
@@ -2883,6 +3038,9 @@ async function handleExport() {
           }
         )
       );
+      // Free pre-decimation geometry — decimate created a separate copy
+      displaced.dispose();
+	  if (exportToken !== myToken) return;
     }
 
     // Flat-bottom clamp: when bottom faces are masked (bottomAngleLimit > 0),
@@ -2915,13 +3073,22 @@ async function handleExport() {
       else finalGeometry.attributes.normal.needsUpdate = true;
     }
 
-    setProgress(0.97, t('progress.writingStl'));
-    await yieldFrame();
-
     const texLabel = activeMapEntry.isCustom ? 'custom' : activeMapEntry.name.replace(/\s+/g, '-');
     const ampLabel = settings.amplitude.toFixed(2).replace('.', 'p');
-    const exportName = `${currentStlName}_${texLabel}_amp${ampLabel}.stl`;
-    exportSTL(finalGeometry, exportName);
+    const baseName = `${currentStlName}_${texLabel}_amp${ampLabel}`;
+
+    if (format === '3mf') {
+      setProgress(0.97, t('progress.writing3mf'));
+      await yieldFrame();
+      if (exportToken !== myToken) return;
+      export3MF(finalGeometry, `${baseName}.3mf`);
+    } else {
+      setProgress(0.97, t('progress.writingStl'));
+      await yieldFrame();
+      if (exportToken !== myToken) return;
+      exportSTL(finalGeometry, `${baseName}.stl`);
+    }
+    exportSucceeded = true;
 
     setProgress(1.0, t('progress.done'));
     setTimeout(() => {
@@ -2931,10 +3098,17 @@ async function handleExport() {
   } catch (err) {
     console.error('Export failed:', err);
     alert(t('alerts.exportFailed', { msg: err.message }));
-    exportProgress.classList.add('hidden');
   } finally {
+    // Dispose all intermediate geometries regardless of success, failure, or abort.
+    // finalGeometry may alias displaced (no decimation) — avoid double-dispose.
+    if (subdivided) subdivided.dispose();
+    if (displaced && displaced !== subdivided) displaced.dispose();
+    if (finalGeometry && finalGeometry !== displaced && finalGeometry !== subdivided) finalGeometry.dispose();
+    // Hide progress immediately on error or stale abort; success hides it after 1500 ms.
+    if (!exportSucceeded) exportProgress.classList.add('hidden');
     isExporting = false;
     exportBtn.classList.remove('busy');
+    export3mfBtn.classList.remove('busy');
   }
 }
 
@@ -2945,16 +3119,20 @@ function setProgress(fraction, label) {
   exportProgLbl.textContent = label;
 }
 
-/** Yield to the browser event loop for one frame, then run fn. */
+/**
+ * Yield to the browser event loop, then run fn.
+ * Uses setTimeout instead of rAF so it fires even in background tabs.
+ */
 function runAsync(fn) {
   return new Promise((resolve, reject) => {
-    requestAnimationFrame(() => {
+    setTimeout(() => {
       try { resolve(fn()); }
       catch (e) { reject(e); }
-    });
+    }, 0);
   });
 }
 
+/** Yield to the browser event loop (for progress bar paints etc.). */
 function yieldFrame() {
-  return new Promise(r => requestAnimationFrame(r));
+  return new Promise(r => setTimeout(r, 0));
 }
