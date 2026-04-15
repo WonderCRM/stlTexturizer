@@ -68,6 +68,8 @@ const settings = {
   scaleU:        0.5,
   scaleV:        0.5,
   amplitude:     0.5,
+  textureHeight: 0.5,
+  invertDisplacement: false,
   offsetU:       0.0,
   offsetV:       0.0,
   rotation:      0,
@@ -231,6 +233,7 @@ const rotationSlider = document.getElementById('rotation');
 const rotationVal    = document.getElementById('rotation-val');
 const amplitudeVal      = document.getElementById('amplitude-val');
 const amplitudeWarning  = document.getElementById('amplitude-warning');
+const invertDisplacementCheckbox = document.getElementById('invert-displacement');
 const refineLenVal = document.getElementById('refine-length-val');
 const resolutionWarning = document.getElementById('resolution-warning');
 const maxTriVal    = document.getElementById('max-triangles-val');
@@ -646,8 +649,18 @@ function wireEvents() {
   linkSlider(offsetUSlider,   offsetUVal,   v => { settings.offsetU   = v; return v.toFixed(2); });
   linkSlider(offsetVSlider,   offsetVVal,   v => { settings.offsetV   = v; return v.toFixed(2); });
   linkSlider(rotationSlider,  rotationVal,  v => { settings.rotation  = v; return Math.round(v); });
-  linkSlider(amplitudeSlider, amplitudeVal, v => { settings.amplitude = v; checkAmplitudeWarning(); return v.toFixed(2); });
+  linkSlider(amplitudeSlider, amplitudeVal, v => {
+    settings.textureHeight = v;
+    settings.amplitude = (settings.invertDisplacement ? -1 : 1) * v;
+    checkAmplitudeWarning();
+    return v.toFixed(2);
+  });
   amplitudeVal.addEventListener('change', checkAmplitudeWarning);
+  invertDisplacementCheckbox.addEventListener('change', () => {
+    settings.invertDisplacement = invertDisplacementCheckbox.checked;
+    settings.amplitude = (settings.invertDisplacement ? -1 : 1) * settings.textureHeight;
+    updatePreview();
+  });
   linkSlider(boundaryFalloffSlider, boundaryFalloffVal, v => { settings.boundaryFalloff = v; _falloffDirty = true; return v.toFixed(1); });
   linkSlider(refineLenSlider, refineLenVal, v => { settings.refineLength  = v; checkResolutionWarning(); return v.toFixed(2); }, false);
   refineLenVal.addEventListener('change', checkResolutionWarning);
@@ -2107,7 +2120,7 @@ async function handleModelFile(file) {
 function checkAmplitudeWarning() {
   if (!currentBounds) return;
   const minDim = Math.min(currentBounds.size.x, currentBounds.size.y, currentBounds.size.z);
-  const danger = Math.abs(settings.amplitude) > minDim * 0.1;
+  const danger = settings.textureHeight > minDim * 0.1;
   amplitudeWarning.classList.toggle('hidden', !danger);
   amplitudeSlider.classList.toggle('amp-danger', danger);
   amplitudeVal.classList.toggle('amp-danger', danger);

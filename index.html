@@ -78,7 +78,7 @@
         </div>
         <div id="store-cta-wrapper">
           <span id="store-cta">
-            <span data-i18n-html="cta.store">Support this tool? Shop at <a href="https://geni.us/CNCStoreTexture" target="_blank" rel="noopener noreferrer">CNCKitchen.STORE</a> or donate on <a href="https://www.paypal.me/CNCKitchen" target="_blank" rel="noopener noreferrer">PayPal</a> / <a href="https://ko-fi.com/cnckitchen" target="_blank" rel="noopener noreferrer">Ko-fi</a></span><button id="store-cta-dismiss" aria-label="Dismiss">&times;</button>
+            <span data-i18n-html="cta.store">Support this tool? Shop at <a href="https://geni.us/CNCStoreTexture" target="_blank" rel="noopener noreferrer">CNCKitchen.STORE</a> or send a tip via <a href="https://www.paypal.me/CNCKitchen" target="_blank" rel="noopener noreferrer">PayPal</a> / <a href="https://ko-fi.com/cnckitchen" target="_blank" rel="noopener noreferrer">Ko-fi</a></span><button id="store-cta-dismiss" aria-label="Dismiss">&times;</button>
           </span>
         </div>
       </div>
@@ -196,12 +196,18 @@
       <section class="panel-section">
         <h2 data-i18n="sections.displacement">Displacement</h2>
         <div class="form-row slider-row">
-          <label for="amplitude" data-i18n="labels.amplitude">Amplitude (mm)</label>
-          <input type="range" id="amplitude" min="-2" max="2" step="0.01" value="0.5" />
-          <input type="number" class="val" id="amplitude-val" value="0.5" min="-100" max="100" step="0.01" data-wheel-decimals="2" />
+          <label for="amplitude" data-i18n="labels.textureHeight">Texture height (mm)</label>
+          <input type="range" id="amplitude" min="0" max="2" step="0.01" value="0.5" />
+          <input type="number" class="val" id="amplitude-val" value="0.5" min="0" max="100" step="0.01" data-wheel-decimals="2" />
         </div>
-        <div id="amplitude-warning" class="amplitude-warning hidden" data-i18n="warnings.amplitudeOverlap">
-          ⚠ Amplitude exceeds 10% of the smallest model dimension — geometry overlaps may occur in the exported STL.
+        <div class="form-row">
+          <label class="checkbox-label" for="invert-displacement">
+            <input type="checkbox" id="invert-displacement" />
+            <span data-i18n="labels.invertDisplacement">Invert (push in instead of out)</span>
+          </label>
+        </div>
+        <div id="amplitude-warning" class="amplitude-warning hidden" data-i18n="warnings.textureHeightOverlap">
+          ⚠ Texture height exceeds 10% of the smallest model dimension — geometry overlaps may occur in the exported STL.
         </div>
 
         <div class="form-row">
@@ -424,7 +430,7 @@
         <li data-i18n-html="license.item5"><strong>No support</strong> is provided. The author is under no obligation to fix bugs, answer questions, or update this tool. That said, bug reports and feature requests are always welcome at <a href="mailto:texturizer@cnckitchen.com">texturizer@cnckitchen.com</a>.</li>
         <li data-i18n-html="license.item6">The author shall not be held <strong>liable</strong> for any damages, data loss, or issues arising from the use of this tool.</li>
         <li data-i18n-html="license.item7">Want to license or embed this tool for your own business or website? Contact us at <a href="mailto:contact@cnckitchen.com">contact@cnckitchen.com</a>.</li>
-        <li data-i18n-html="license.item3">Support this tool? Shop at <a href="https://geni.us/CNCStoreTexture" target="_blank" rel="noopener">CNCKitchen.STORE</a> or donate on <a href="https://www.paypal.me/CNCKitchen" target="_blank" rel="noopener">PayPal</a> / <a href="https://ko-fi.com/cnckitchen" target="_blank" rel="noopener">Ko-fi</a>.</li>
+        <li data-i18n-html="license.item3">Support this tool? Shop at <a href="https://geni.us/CNCStoreTexture" target="_blank" rel="noopener">CNCKitchen.STORE</a> or send a tip via <a href="https://www.paypal.me/CNCKitchen" target="_blank" rel="noopener">PayPal</a> / <a href="https://ko-fi.com/cnckitchen" target="_blank" rel="noopener">Ko-fi</a>.</li>
         <li data-i18n-html="license.item8">Source code available on <a href="https://github.com/CNCKitchen/stlTexturizer" target="_blank" rel="noopener">GitHub</a>.</li>
       </ul>
     </div>
@@ -463,10 +469,10 @@
         🛒 Visit CNCKitchen.STORE
       </a>
       <a href="https://www.paypal.me/CNCKitchen" target="_blank" rel="noopener noreferrer" class="sponsor-link sponsor-link--paypal" data-i18n="sponsor.donate">
-        💙 Donate on PayPal
+        💙 Send a tip on PayPal
       </a>
       <a href="https://ko-fi.com/cnckitchen" target="_blank" rel="noopener noreferrer" class="sponsor-link sponsor-link--kofi" data-i18n="sponsor.donateKofi">
-        ☕ Support on Ko-fi
+        ☕ Send a tip on Ko-fi
       </a>
       <label class="sponsor-no-show">
         <input type="checkbox" id="sponsor-dont-show" />
