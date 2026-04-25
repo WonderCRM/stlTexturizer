@@ -174,6 +174,8 @@ export default {
   "header.exportProject": "Guardar projeto (.bumpmesh)",
   "header.importProject": "Carregar projeto (.bumpmesh)",
   "header.resetSettings": "Repor predefinições",
+  "header.undo": "Desfazer (Ctrl+Z)",
+  "header.redo": "Refazer (Ctrl+Shift+Z)",
   "alerts.resetConfirm": "Repor todas as definições para os valores predefinidos?",
   "header.exportSettingsLabel": "Definições",
   "header.exportModelLabel": "Modelo (STL)",

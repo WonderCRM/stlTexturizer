@@ -1410,6 +1410,11 @@ input[type="number"].val:focus { outline: none; border-color: var(--accent); }
   flex-shrink: 0;
 }
 
+.project-io-gap {
+  width: 8px;
+  flex: 0 0 8px;
+}
+
 .project-io .icon-btn {
   display: flex;
   align-items: center;
@@ -1425,9 +1430,14 @@ input[type="number"].val:focus { outline: none; border-color: var(--accent); }
   padding: 0;
 }
 
-.project-io .icon-btn:hover {
+.project-io .icon-btn:hover:not(:disabled) {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+.project-io .icon-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
 }
 
 .export-dialog {

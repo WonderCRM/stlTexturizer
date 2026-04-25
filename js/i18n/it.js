@@ -174,6 +174,8 @@ export default {
   "header.exportProject": "Salva progetto (.bumpmesh)",
   "header.importProject": "Carica progetto (.bumpmesh)",
   "header.resetSettings": "Ripristina valori predefiniti",
+  "header.undo": "Annulla (Ctrl+Z)",
+  "header.redo": "Ripeti (Ctrl+Maiusc+Z)",
   "alerts.resetConfirm": "Ripristinare tutte le impostazioni ai valori predefiniti?",
   "header.exportSettingsLabel": "Impostazioni",
   "header.exportModelLabel": "Modello (STL)",

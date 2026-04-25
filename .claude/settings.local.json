@@ -27,7 +27,10 @@
       "Bash(node .test-mask.mjs)",
       "Bash(node .test-reset-resolution.mjs)",
       "Bash(node .test-reset-mask.mjs)",
-      "Bash(node .test-model-swap.mjs)"
+      "Bash(node .test-model-swap.mjs)",
+      "Bash(node --check c:/Users/stefa/Desktop/stlTexturizer/js/main.js)",
+      "Bash(node c:/Users/stefa/Desktop/stlTexturizer/test-undo.mjs)",
+      "Bash(node --check c:/Users/stefa/Desktop/stlTexturizer/js/i18n/en.js)"
     ]
   }
 }

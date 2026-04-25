@@ -174,6 +174,8 @@ export default {
   "header.exportProject": "プロジェクトを保存 (.bumpmesh)",
   "header.importProject": "プロジェクトを読み込み (.bumpmesh)",
   "header.resetSettings": "デフォルトに戻す",
+  "header.undo": "元に戻す (Ctrl+Z)",
+  "header.redo": "やり直し (Ctrl+Shift+Z)",
   "alerts.resetConfirm": "すべての設定をデフォルト値に戻しますか？",
   "header.exportSettingsLabel": "設定",
   "header.exportModelLabel": "モデル (STL)",

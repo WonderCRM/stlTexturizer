@@ -2084,6 +2084,7 @@ function loadDefaultCube() {
 }
 
 async function handleModelFile(file) {
+  _undoApplyDepth++;
   try {
     const { geometry, bounds, nanCount, degenerateCount } = await loadModelFile(file);
 
@@ -2210,6 +2211,11 @@ async function handleModelFile(file) {
   } catch (err) {
     console.error('Failed to load model:', err);
     alert(t('alerts.loadFailed', { msg: err.message }));
+  } finally {
+    _undoApplyDepth--;
+    // Mask indices reference the freshly-loaded triangle set, so any prior
+    // history is meaningless for the new geometry.
+    _clearUndoStacks();
   }
 }
 
@@ -3853,6 +3859,15 @@ const DEFAULT_SETTINGS_SNAPSHOT = Object.freeze({
 });
 
 function resetSettingsToDefaults() {
+  // Capture any pending edit, then push the pre-reset state so Ctrl+Z
+  // restores all 20 parameters AND the painted mask.
+  _flushUndoCapture();
+  if (_baselineSnapshot) {
+    _undoStack.push(_baselineSnapshot);
+    if (_undoStack.length > UNDO_LIMIT) _undoStack.shift();
+    _redoStack.length = 0;
+  }
+  _undoApplyDepth++;
   // Pause autosave so each intermediate change event doesn't queue a save;
   // we clear sessionStorage explicitly below.
   _autoSavePaused = true;
@@ -3885,6 +3900,9 @@ function resetSettingsToDefaults() {
     try { sessionStorage.removeItem(PROJECT_STORAGE_KEY); } catch { /* ignore */ }
   } finally {
     _autoSavePaused = false;
+    _undoApplyDepth--;
+    _baselineSnapshot = _captureUndoSnapshot();
+    _updateUndoButtons();
   }
 }
 
@@ -4055,6 +4073,8 @@ async function importProject(file) {
   if (file.size > PROJECT_MAX_IMPORT) {
     throw new Error(`File too large (${(file.size / 1024 / 1024).toFixed(1)} MB, max 500 MB)`);
   }
+  _undoApplyDepth++;
+  try {
   const buf = await file.arrayBuffer();
   const unzipped = unzipSync(new Uint8Array(buf));
 
@@ -4100,7 +4120,169 @@ async function importProject(file) {
   }
 
   _autoSaveSettings();
+  } finally {
+    _undoApplyDepth--;
+    // Imported project = fresh start; mask indices belong to the imported model.
+    _clearUndoStacks();
+  }
 }
 
-// Restore last session's settings on startup.
+// ── Undo / Redo ──────────────────────────────────────────────────────────────
+// Snapshot stack over the same state the project save/load helpers handle:
+// `getSettingsSnapshot()` (PERSISTED_KEYS + activeMapName) and
+// `_collectCurrentMask()` (selectionMode + excluded face indices). Operations
+// are debounced so a slider drag collapses to one undo step.
+
+const UNDO_LIMIT = 50;
+const UNDO_DEBOUNCE_MS = 400;
+
+let _undoStack = [];
+let _redoStack = [];
+let _baselineSnapshot = null;     // last committed state — the "before" of the next push
+let _undoApplyDepth = 0;          // > 0 while applying — suppresses re-capture
+let _undoCaptureTimer = null;
+
+const undoBtn = document.getElementById('undo-btn');
+const redoBtn = document.getElementById('redo-btn');
+
+function _captureUndoSnapshot() {
+  return {
+    settings: getSettingsSnapshot(),
+    mask:     _collectCurrentMask(),
+  };
+}
+
+function _undoSnapshotsEqual(a, b) {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  for (const k of PERSISTED_KEYS) {
+    if (a.settings[k] !== b.settings[k]) return false;
+  }
+  if ((a.settings.activeMapName || null) !== (b.settings.activeMapName || null)) return false;
+  const ma = a.mask, mb = b.mask;
+  if (!ma && !mb) return true;
+  if (!ma || !mb) return false;
+  if (ma.selectionMode !== mb.selectionMode) return false;
+  if (ma.excluded.length !== mb.excluded.length) return false;
+  const sb = new Set(mb.excluded);
+  for (const v of ma.excluded) if (!sb.has(v)) return false;
+  return true;
+}
+
+function _commitUndoCapture() {
+  _undoCaptureTimer = null;
+  if (_undoApplyDepth > 0) return;
+  const next = _captureUndoSnapshot();
+  if (_baselineSnapshot && _undoSnapshotsEqual(_baselineSnapshot, next)) return;
+  if (_baselineSnapshot) {
+    _undoStack.push(_baselineSnapshot);
+    if (_undoStack.length > UNDO_LIMIT) _undoStack.shift();
+  }
+  _redoStack.length = 0;
+  _baselineSnapshot = next;
+  _updateUndoButtons();
+}
+
+function _scheduleUndoCapture() {
+  if (_undoApplyDepth > 0) return;
+  clearTimeout(_undoCaptureTimer);
+  _undoCaptureTimer = setTimeout(_commitUndoCapture, UNDO_DEBOUNCE_MS);
+}
+
+function _flushUndoCapture() {
+  if (_undoCaptureTimer) {
+    clearTimeout(_undoCaptureTimer);
+    _undoCaptureTimer = null;
+    _commitUndoCapture();
+  }
+}
+
+function _clearUndoStacks() {
+  _undoStack.length = 0;
+  _redoStack.length = 0;
+  if (_undoCaptureTimer) { clearTimeout(_undoCaptureTimer); _undoCaptureTimer = null; }
+  _baselineSnapshot = _captureUndoSnapshot();
+  _updateUndoButtons();
+}
+
+function _applyUndoSnapshot(snap) {
+  _undoApplyDepth++;
+  try {
+    applySettingsSnapshot(snap.settings);
+    _restoreMask(snap.mask);
+    if (snap.settings && snap.settings.activeMapName) {
+      _selectPresetByName(snap.settings.activeMapName);
+    }
+    updatePreview();
+    _autoSaveSettings();
+  } finally {
+    _undoApplyDepth--;
+  }
+}
+
+function _undo() {
+  _flushUndoCapture();
+  if (!_undoStack.length) return;
+  const prev = _undoStack.pop();
+  if (_baselineSnapshot) _redoStack.push(_baselineSnapshot);
+  _applyUndoSnapshot(prev);
+  _baselineSnapshot = prev;
+  _updateUndoButtons();
+}
+
+function _redo() {
+  _flushUndoCapture();
+  if (!_redoStack.length) return;
+  const next = _redoStack.pop();
+  if (_baselineSnapshot) _undoStack.push(_baselineSnapshot);
+  _applyUndoSnapshot(next);
+  _baselineSnapshot = next;
+  _updateUndoButtons();
+}
+
+function _updateUndoButtons() {
+  if (undoBtn) undoBtn.disabled = _undoStack.length === 0;
+  if (redoBtn) redoBtn.disabled = _redoStack.length === 0;
+}
+
+// Capture hooks — piggyback on the same input/change bubbling that drives
+// autosave (line 3834), plus a global pointerup so mask paint strokes (which
+// don't go through #settings-panel events) terminate into a snapshot.
+if (_settingsPanel) {
+  _settingsPanel.addEventListener('input',  _scheduleUndoCapture);
+  _settingsPanel.addEventListener('change', _scheduleUndoCapture);
+}
+lockScaleBtn.addEventListener('click', _scheduleUndoCapture);
+window.addEventListener('pointerup', _scheduleUndoCapture);
+
+// Buttons
+if (undoBtn) undoBtn.addEventListener('click', _undo);
+if (redoBtn) redoBtn.addEventListener('click', _redo);
+
+// Keyboard: Ctrl/Cmd+Z = undo, Ctrl/Cmd+Shift+Z (or Ctrl/Cmd+Y) = redo.
+// Skip when focus is in a text-entry control so the browser's native field
+// undo works there.
+window.addEventListener('keydown', (e) => {
+  const mod = e.ctrlKey || e.metaKey;
+  if (!mod) return;
+  const k = (e.key || '').toLowerCase();
+  if (k !== 'z' && k !== 'y') return;
+  const tgt = e.target;
+  if (tgt) {
+    if (tgt.isContentEditable) return;
+    if (tgt.tagName === 'TEXTAREA') return;
+    if (tgt.tagName === 'INPUT') {
+      const tt = (tgt.type || '').toLowerCase();
+      if (tt === 'text' || tt === 'number' || tt === 'search' ||
+          tt === 'tel'  || tt === 'email'  || tt === 'url'    ||
+          tt === 'password') return;
+    }
+  }
+  if (k === 'z' && !e.shiftKey) { e.preventDefault(); _undo(); }
+  else                          { e.preventDefault(); _redo(); }
+});
+
+// Restore last session's settings on startup, then take an initial baseline.
 _restoreSessionSettings();
+_baselineSnapshot = _captureUndoSnapshot();
+_updateUndoButtons();
