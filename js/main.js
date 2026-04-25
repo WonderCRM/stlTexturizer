@@ -40,7 +40,7 @@ let _falloffGeometry   = null;   // geometry the falloff was last computed for
 let excludedFaces      = new Set();   // triangle indices in currentGeometry
 let triangleAdjacency  = null;        // Array from buildAdjacency
 let triangleCentroids  = null;        // Float32Array from buildAdjacency
-let triangleBoundRadii = null;        // Float32Array — max vertex-to-centroid dist per tri
+let triangleFaceNormals = null;       // Float32Array — local-space unit face normal per tri
 let exclusionTool      = null;        // 'brush' | 'bucket' | null
 let eraseMode          = false;
 let brushIsRadius      = false;
@@ -59,11 +59,6 @@ let _shiftLineMesh     = null;        // THREE.Line — preview line from last p
 let _lastEffectiveTexture = null;
 let _effectiveMapCache    = null;
 let _effectiveMapCacheKey = null;
-
-// ── Spatial grid state (must precede loadDefaultCube call) ────────────────────
-let _spatialGrid = null;
-let _spatialCellSize = 0;
-let _spatialMinX = 0, _spatialMinY = 0, _spatialMinZ = 0;
 
 const settings = {
   mappingMode:   5,     // Triplanar default
@@ -167,7 +162,7 @@ let precisionParentMap      = null;   // Int32Array: refined face → original f
 let precisionEdgeLength     = null;   // edge length used for current refinement
 let precisionBusy           = false;  // true while async subdivision is running
 let precisionCentroids      = null;   // Float32Array from buildAdjacency on refined mesh
-let precisionBoundRadii     = null;   // Float32Array — max vertex-to-centroid per refined tri
+let precisionFaceNormals    = null;   // Float32Array — local-space unit face normal per refined tri
 let precisionAdjacency      = null;   // Array from buildAdjacency on refined mesh
 let precisionExcludedFaces  = new Set(); // precision face indices excluded while precision is active
 
@@ -1085,6 +1080,11 @@ function wireEvents() {
     if (!isPainting) return;
     isPainting = false;
     getControls().enabled = true;
+    // Capture the completed stroke synchronously so quick consecutive strokes
+    // each get their own undo entry — the debounced window-pointerup capture
+    // would otherwise collapse strokes that finish within UNDO_DEBOUNCE_MS.
+    _flushUndoCapture();
+    _commitUndoCapture();
   });
 
   document.addEventListener('keydown', (e) => {
@@ -1267,83 +1267,86 @@ function distSqPointToTri(px, py, pz, ax, ay, az, bx, by, bz, cx, cy, cz) {
   return qx*qx + qy*qy + qz*qz;
 }
 
-// ── Spatial grid for fast sphere queries ──────────────────────────────────
+/**
+ * BFS-along-adjacency circle brush (after PrusaSlicer's TriangleSelector).
+ *
+ * Starts at `seedTriIdx`, walks the mesh's neighbor graph, and invokes
+ * cb(triIdx) for every triangle that:
+ *   1. has at least one part inside the brush "cylinder" (the projection of
+ *      a 3D distance-to-triangle test onto the plane perpendicular to
+ *      `viewDir`), AND
+ *   2. is reachable without crossing any back-facing triangle.
+ *
+ * Back-face culling at the BFS expansion step is what makes this both fast
+ * and correct: the walk can't tunnel through a thin shell to its hidden
+ * other side because the connecting wall faces away from the camera. Work
+ * is bounded by the painted area, not the mesh size — no spatial index
+ * required.
+ */
+function bfsBrushSelect(seedTriIdx, hitPt, r2, viewDir, cb) {
+  const usePrecision = precisionMaskingEnabled && precisionGeometry;
+  const adjacency  = usePrecision ? precisionAdjacency  : triangleAdjacency;
+  const faceNormals = usePrecision ? precisionFaceNormals : triangleFaceNormals;
+  const geo        = usePrecision ? precisionGeometry   : currentGeometry;
+  if (!adjacency || !faceNormals || !geo || seedTriIdx < 0 || seedTriIdx >= adjacency.length) return;
+  const pos = geo.attributes.position;
 
-function buildSpatialGrid(centroids, triCount, bounds) {
-  const vol = bounds.size.x * bounds.size.y * bounds.size.z;
-  const cellSize = Math.max(Math.cbrt(vol / Math.max(triCount, 1)) * 2, 1e-6);
-  _spatialCellSize = cellSize;
-  _spatialMinX = bounds.min.x;
-  _spatialMinY = bounds.min.y;
-  _spatialMinZ = bounds.min.z;
-  const grid = new Map();
-  for (let t = 0; t < triCount; t++) {
-    const gx = Math.floor((centroids[t*3]   - _spatialMinX) / cellSize);
-    const gy = Math.floor((centroids[t*3+1] - _spatialMinY) / cellSize);
-    const gz = Math.floor((centroids[t*3+2] - _spatialMinZ) / cellSize);
-    const key = (gx * 73856093) ^ (gy * 19349663) ^ (gz * 83492791);
-    let list = grid.get(key);
-    if (!list) { list = []; grid.set(key, list); }
-    list.push(t);
+  const vdx = viewDir.x, vdy = viewDir.y, vdz = viewDir.z;
+  const hx  = hitPt.x,   hy  = hitPt.y,   hz  = hitPt.z;
+
+  const visited = new Uint8Array(adjacency.length);
+  visited[seedTriIdx] = 1;
+  const queue = [seedTriIdx];
+  let head = 0;
+
+  while (head < queue.length) {
+    const cur = queue[head++];
+    const i3 = cur * 3;
+
+    // Inside-test: project each vertex onto the plane through hitPt
+    // perpendicular to viewDir, then take 3D point-to-triangle distance to
+    // the projected triangle (equivalent to 2D screen-space disk in world
+    // units). Any triangle with at least partial overlap → cb + expand.
+    const ax = pos.getX(i3),     ay = pos.getY(i3),     az = pos.getZ(i3);
+    const bx = pos.getX(i3 + 1), by = pos.getY(i3 + 1), bz = pos.getZ(i3 + 1);
+    const cx = pos.getX(i3 + 2), cy = pos.getY(i3 + 2), cz = pos.getZ(i3 + 2);
+
+    const da = (ax - hx) * vdx + (ay - hy) * vdy + (az - hz) * vdz;
+    const db = (bx - hx) * vdx + (by - hy) * vdy + (bz - hz) * vdz;
+    const dc = (cx - hx) * vdx + (cy - hy) * vdy + (cz - hz) * vdz;
+
+    const d2 = distSqPointToTri(
+      hx, hy, hz,
+      ax - da * vdx, ay - da * vdy, az - da * vdz,
+      bx - db * vdx, by - db * vdy, bz - db * vdz,
+      cx - dc * vdx, cy - dc * vdy, cz - dc * vdz
+    );
+    if (d2 > r2) continue; // outside cylinder — don't paint, don't expand
+
+    cb(cur);
+
+    const nbrs = adjacency[cur];
+    if (!nbrs) continue;
+    for (let k = 0; k < nbrs.length; k++) {
+      const nb = nbrs[k].neighbor;
+      if (visited[nb]) continue;
+      visited[nb] = 1;
+      // Cull back-facing neighbors: front-facing means normal opposes view dir
+      // (their dot with viewDir is negative). Eq-zero (perpendicular) also
+      // culled — that's the seam at the silhouette where BFS should stop.
+      const nbi = nb * 3;
+      const dotN = faceNormals[nbi]   * vdx
+                 + faceNormals[nbi+1] * vdy
+                 + faceNormals[nbi+2] * vdz;
+      if (dotN >= 0) continue;
+      queue.push(nb);
+    }
   }
-  _spatialGrid = grid;
 }
 
-/** Test all triangles against a sphere and invoke cb(triIdx) for each hit. */
-function forEachTriInSphere(hitPt, r2, cb) {
-  const usePrecision = precisionMaskingEnabled && precisionGeometry;
-  const geo = usePrecision ? precisionGeometry : currentGeometry;
-  const centroids = usePrecision ? precisionCentroids : triangleCentroids;
-  const boundRadii = usePrecision ? precisionBoundRadii : triangleBoundRadii;
-  const pos = geo.attributes.position;
-  const r = Math.sqrt(r2);
-
-  if (!_spatialGrid) {
-    // Fallback: linear scan (grid not built yet)
-    const triCount = centroids.length / 3;
-    for (let t = 0; t < triCount; t++) {
-      const dx = centroids[t*3] - hitPt.x, dy = centroids[t*3+1] - hitPt.y, dz = centroids[t*3+2] - hitPt.z;
-      const bound = r + boundRadii[t];
-      if (dx*dx + dy*dy + dz*dz > bound*bound) continue;
-      const i = t * 3;
-      const d2 = distSqPointToTri(hitPt.x, hitPt.y, hitPt.z,
-        pos.getX(i), pos.getY(i), pos.getZ(i),
-        pos.getX(i+1), pos.getY(i+1), pos.getZ(i+1),
-        pos.getX(i+2), pos.getY(i+2), pos.getZ(i+2));
-      if (d2 <= r2) cb(t);
-    }
-    return;
-  }
-
-  const cs = _spatialCellSize;
-  const xMin = Math.floor((hitPt.x - r - _spatialMinX) / cs);
-  const xMax = Math.floor((hitPt.x + r - _spatialMinX) / cs);
-  const yMin = Math.floor((hitPt.y - r - _spatialMinY) / cs);
-  const yMax = Math.floor((hitPt.y + r - _spatialMinY) / cs);
-  const zMin = Math.floor((hitPt.z - r - _spatialMinZ) / cs);
-  const zMax = Math.floor((hitPt.z + r - _spatialMinZ) / cs);
-
-  for (let gx = xMin; gx <= xMax; gx++) {
-    for (let gy = yMin; gy <= yMax; gy++) {
-      for (let gz = zMin; gz <= zMax; gz++) {
-        const key = (gx * 73856093) ^ (gy * 19349663) ^ (gz * 83492791);
-        const list = _spatialGrid.get(key);
-        if (!list) continue;
-        for (let li = 0; li < list.length; li++) {
-          const t = list[li];
-          const dx = centroids[t*3] - hitPt.x, dy = centroids[t*3+1] - hitPt.y, dz = centroids[t*3+2] - hitPt.z;
-          const bound = r + boundRadii[t];
-          if (dx*dx + dy*dy + dz*dz > bound*bound) continue;
-          const i = t * 3;
-          const d2 = distSqPointToTri(hitPt.x, hitPt.y, hitPt.z,
-            pos.getX(i), pos.getY(i), pos.getZ(i),
-            pos.getX(i+1), pos.getY(i+1), pos.getZ(i+1),
-            pos.getX(i+2), pos.getY(i+2), pos.getZ(i+2));
-          if (d2 <= r2) cb(t);
-        }
-      }
-    }
-  }
+const _viewDirScratch = new THREE.Vector3();
+function _viewDirFor(hitPt) {
+  return _viewDirScratch.subVectors(hitPt, getCamera().position).normalize();
 }
 
 function _paintSingleHit(hit, mesh) {
@@ -1351,7 +1354,7 @@ function _paintSingleHit(hit, mesh) {
   if (usePrecision) {
     if (brushIsRadius) {
       const r2 = brushRadius * brushRadius;
-      forEachTriInSphere(hit.point, r2, t => {
+      bfsBrushSelect(hit.faceIndex, hit.point, r2, _viewDirFor(hit.point), t => {
         if (eraseMode) precisionExcludedFaces.delete(t); else precisionExcludedFaces.add(t);
       });
     } else {
@@ -1365,7 +1368,7 @@ function _paintSingleHit(hit, mesh) {
     }
     if (brushIsRadius) {
       const r2 = brushRadius * brushRadius;
-      forEachTriInSphere(hit.point, r2, t => {
+      bfsBrushSelect(triIdx, hit.point, r2, _viewDirFor(hit.point), t => {
         if (eraseMode) excludedFaces.delete(t); else excludedFaces.add(t);
       });
     } else {
@@ -1553,7 +1556,7 @@ function handlePlaceOnFaceClick(e) {
   // Reset precision masking (geometry was rotated)
   if (precisionGeometry) { precisionGeometry.dispose(); precisionGeometry = null; }
   precisionParentMap = null; precisionEdgeLength = null;
-  precisionCentroids = null; precisionBoundRadii = null; precisionAdjacency = null;
+  precisionCentroids = null; precisionFaceNormals = null; precisionAdjacency = null;
   precisionMaskingEnabled = false; precisionMaskingToggle.checked = false;
   precisionStatus.textContent = '';
   precisionOutdated.classList.add('hidden'); precisionRefreshBtn.classList.add('hidden');
@@ -1576,8 +1579,8 @@ function handlePlaceOnFaceClick(e) {
   // Rebuild adjacency
   const adjData = buildAdjacency(currentGeometry);
   triangleAdjacency = adjData.adjacency;
-  triangleCentroids = adjData.centroids; triangleBoundRadii = adjData.boundRadii;
-  buildSpatialGrid(triangleCentroids, currentGeometry.attributes.position.count / 3, currentBounds);
+  triangleCentroids = adjData.centroids;
+  triangleFaceNormals = adjData.faceNormals;
 
   // Update edge length for new bounds
   const diag = Math.sqrt(currentBounds.size.x ** 2 + currentBounds.size.y ** 2 + currentBounds.size.z ** 2);
@@ -1739,8 +1742,7 @@ function _rotateFinalize() {
   const adjData = buildAdjacency(currentGeometry);
   triangleAdjacency = adjData.adjacency;
   triangleCentroids = adjData.centroids;
-  triangleBoundRadii = adjData.boundRadii;
-  buildSpatialGrid(triangleCentroids, currentGeometry.attributes.position.count / 3, currentBounds);
+  triangleFaceNormals = adjData.faceNormals;
 
   // Rebuild exclusion overlay
   if (excludedFaces.size > 0) {
@@ -1852,7 +1854,14 @@ function updateBrushHover(e) {
   if (brushIsRadius) {
     const r2 = brushRadius * brushRadius;
     const hovered = new Set();
-    forEachTriInSphere(hit.point, r2, t => hovered.add(t));
+    // Hover seed must be in the same index space as bfsBrushSelect uses.
+    // In precision mode that's hit.faceIndex (precision); in disp-preview
+    // mode it's the parent-mapped index; otherwise it's the raw faceIndex.
+    let seed = hit.faceIndex;
+    if (!usePrecision && dispPreviewGeometry && mesh.geometry === dispPreviewGeometry && dispPreviewParentMap) {
+      seed = dispPreviewParentMap[seed];
+    }
+    bfsBrushSelect(seed, hit.point, r2, _viewDirFor(hit.point), t => hovered.add(t));
     setHoverPreview(buildExclusionOverlayGeo(hoverGeo, hovered), hoverColor);
   } else {
     // For single mode with precision, find the refined face index for the hover highlight
@@ -2055,8 +2064,8 @@ function loadDefaultCube() {
 
   const adjData = buildAdjacency(geo);
   triangleAdjacency = adjData.adjacency;
-  triangleCentroids = adjData.centroids; triangleBoundRadii = adjData.boundRadii;
-  buildSpatialGrid(triangleCentroids, geo.attributes.position.count / 3, currentBounds);
+  triangleCentroids = adjData.centroids;
+  triangleFaceNormals = adjData.faceNormals;
 
   settings.scaleU  = 0.5; scaleUSlider.value = scaleToPos(0.5); scaleUVal.value = 0.5;
   settings.scaleV  = 0.5; scaleVSlider.value = scaleToPos(0.5); scaleVVal.value = 0.5;
@@ -2138,7 +2147,7 @@ async function handleModelFile(file) {
     precisionParentMap  = null;
     precisionEdgeLength = null;
     precisionCentroids  = null;
-    precisionBoundRadii = null;
+    precisionFaceNormals = null;
     precisionAdjacency  = null;
     precisionMaskingEnabled = false;
     precisionMaskingToggle.checked = false;
@@ -2179,8 +2188,8 @@ async function handleModelFile(file) {
     // typical STL sizes processed by this tool)
     const adjData = buildAdjacency(geometry);
     triangleAdjacency = adjData.adjacency;
-    triangleCentroids = adjData.centroids; triangleBoundRadii = adjData.boundRadii;
-    buildSpatialGrid(triangleCentroids, geometry.attributes.position.count / 3, bounds);
+    triangleCentroids = adjData.centroids;
+    triangleFaceNormals = adjData.faceNormals;
     updateMeshDiagnostics(adjData, geometry.attributes.position.count / 3);
 
     // Carry scale, offset, rotation, and all other tuning across model swaps —
@@ -3173,13 +3182,9 @@ function deactivatePrecisionMasking() {
     currentGeometry = precisionGeometry;
 
     // Promote precision adjacency data to the base adjacency
-    triangleAdjacency  = precisionAdjacency;
-    triangleCentroids  = precisionCentroids;
-    triangleBoundRadii = precisionBoundRadii;
-
-    // Rebuild spatial grid for the promoted base mesh
-    const triCount = currentGeometry.attributes.position.count / 3;
-    buildSpatialGrid(triangleCentroids, triCount, currentBounds);
+    triangleAdjacency   = precisionAdjacency;
+    triangleCentroids   = precisionCentroids;
+    triangleFaceNormals = precisionFaceNormals;
 
     // Promote precision excluded faces to the base set
     excludedFaces = precisionExcludedFaces;
@@ -3204,7 +3209,7 @@ function deactivatePrecisionMasking() {
   precisionParentMap  = null;
   precisionEdgeLength = null;
   precisionCentroids  = null;
-  precisionBoundRadii = null;
+  precisionFaceNormals = null;
   precisionAdjacency  = null;
   precisionMaskingEnabled = false;
   precisionMaskingToggle.checked = false;
@@ -3259,13 +3264,9 @@ async function refreshPrecisionMesh() {
 
     // Build adjacency data for the refined mesh
     const adjData = buildAdjacency(precisionGeometry);
-    precisionAdjacency  = adjData.adjacency;
-    precisionCentroids  = adjData.centroids;
-    precisionBoundRadii = adjData.boundRadii;
-
-    // Rebuild spatial grid for the precision mesh so brush queries are fast
-    const precTriCount = precisionGeometry.attributes.position.count / 3;
-    buildSpatialGrid(precisionCentroids, precTriCount, currentBounds);
+    precisionAdjacency   = adjData.adjacency;
+    precisionCentroids   = adjData.centroids;
+    precisionFaceNormals = adjData.faceNormals;
 
     // Seed precisionExcludedFaces from existing excludedFaces
     precisionExcludedFaces = new Set();
@@ -4034,7 +4035,18 @@ function _collectCurrentMask() {
  * file always ships its own model, but we still validate).
  */
 function _restoreMask(mask) {
-  if (!mask || !currentGeometry) return;
+  if (!currentGeometry) return;
+  // null mask = exclude-mode with zero painted faces (the implicit default).
+  // Without this branch, undoing back to the empty baseline would leave the
+  // previously-painted mask on screen because the early-return skipped the
+  // clear, making subsequent undo/redo appear broken.
+  if (!mask) {
+    if (selectionMode) setSelectionMode(false); // also clears the face sets
+    excludedFaces = new Set();
+    precisionExcludedFaces = new Set();
+    refreshExclusionOverlay();
+    return;
+  }
   const triCount = (currentGeometry.attributes.position.count / 3) | 0;
   // setSelectionMode clears any current paint, so flip mode FIRST then seed.
   if (mask.selectionMode === true)  setSelectionMode(true);

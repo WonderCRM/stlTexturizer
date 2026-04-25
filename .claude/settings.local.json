@@ -30,7 +30,19 @@
       "Bash(node .test-model-swap.mjs)",
       "Bash(node --check c:/Users/stefa/Desktop/stlTexturizer/js/main.js)",
       "Bash(node c:/Users/stefa/Desktop/stlTexturizer/test-undo.mjs)",
-      "Bash(node --check c:/Users/stefa/Desktop/stlTexturizer/js/i18n/en.js)"
+      "Bash(node --check c:/Users/stefa/Desktop/stlTexturizer/js/i18n/en.js)",
+      "Bash(node --check js/exclusion.js)",
+      "Bash(node test-brush-visibility.mjs)",
+      "WebFetch(domain:github.com)",
+      "WebSearch",
+      "Bash(curl -sL https://raw.githubusercontent.com/prusa3d/PrusaSlicer/master/src/libslic3r/TriangleSelector.hpp -o /tmp/TS.hpp)",
+      "Bash(curl -sL https://raw.githubusercontent.com/prusa3d/PrusaSlicer/master/src/libslic3r/TriangleSelector.cpp -o /tmp/TS.cpp)",
+      "Read(//tmp/**)",
+      "Bash(mkdir -p /c/temp/ps)",
+      "Bash(curl -sL https://raw.githubusercontent.com/prusa3d/PrusaSlicer/master/src/libslic3r/TriangleSelector.hpp -o /c/temp/ps/TS.hpp)",
+      "Bash(curl -sL https://raw.githubusercontent.com/prusa3d/PrusaSlicer/master/src/libslic3r/TriangleSelector.cpp -o /c/temp/ps/TS.cpp)",
+      "Read(//c/temp/ps/**)",
+      "Bash(node --check js/main.js)"
     ]
   }
 }

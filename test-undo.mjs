@@ -203,6 +203,45 @@ _commitUndoCapture();
 _undo();
 check('after undo, returns to 0.111 (the new baseline)', state.settings.amplitude === 0.111);
 
+// ── 9) Regression: _restoreMask(null) must clear the mask ────────────────────
+// Bug: an earlier main.js _restoreMask did `if (!mask) return;`, leaving the
+// previous stroke's faces on screen when undoing back to the empty baseline.
+console.log('\n[9] _restoreMask(null) clears state');
+state.excludedFaces = new Set([1, 2, 3]);
+state.selectionMode = false;
+_restoreMask(null);
+check('null mask clears excludedFaces', state.excludedFaces.size === 0);
+check('null mask leaves selectionMode false', state.selectionMode === false);
+
+state.excludedFaces = new Set([4, 5]);
+state.selectionMode = true;
+_restoreMask(null);
+check('null mask resets include→exclude mode', state.selectionMode === false);
+check('null mask clears excludedFaces (from include mode)', state.excludedFaces.size === 0);
+
+// ── 10) Regression: many brush strokes, undo all the way back ───────────────
+// Mirrors the user's report: paint several strokes, then undo each one. Each
+// undo must visibly change the mask, and the final undo must end at empty.
+console.log('\n[10] Multi-stroke paint: undo back to empty');
+_clearUndoStacks();
+state.excludedFaces = new Set();
+state.selectionMode = false;
+_baselineSnapshot = _captureUndoSnapshot();
+
+const strokes = [[10,11,12], [20,21,22], [30,31,32], [40,41,42], [50,51,52]];
+for (const s of strokes) { for (const f of s) state.excludedFaces.add(f); _commitUndoCapture(); }
+check('5 strokes → 5 undo entries', _undoStack.length === 5, `got ${_undoStack.length}`);
+
+for (let i = 0; i < 5; i++) _undo();
+check('after 5 undos, mask is empty', state.excludedFaces.size === 0,
+  `still have ${state.excludedFaces.size} faces`);
+check('redo stack has 5 entries', _redoStack.length === 5);
+
+for (let i = 0; i < 5; i++) _redo();
+check('after 5 redos, all 15 faces present', state.excludedFaces.size === 15,
+  `got ${state.excludedFaces.size}`);
+check('redo stack empty after fully redoing', _redoStack.length === 0);
+
 // ── Result ───────────────────────────────────────────────────────────────────
 console.log(`\n${failed === 0 ? 'PASS' : 'FAIL'}: ${failed} failure(s)`);
 process.exit(failed === 0 ? 0 : 1);
