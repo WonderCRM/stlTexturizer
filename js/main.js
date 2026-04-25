@@ -17,6 +17,7 @@ import { buildAdjacency, bucketFill,
 import { runFastDiagnostics, runExpensiveDiagnostics,
          getEdgePositions, getShellAssignments } from './meshValidation.js';
 import { t, initLang, setLang, getLang, applyTranslations, TRANSLATIONS } from './i18n.js';
+import { zipSync, unzipSync, strToU8, strFromU8 } from 'fflate';
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -24,6 +25,7 @@ let currentGeometry   = null;   // original loaded geometry
 let currentBounds     = null;   // bounds of the original geometry
 let currentStlName    = 'model'; // base filename of the loaded STL (no extension)
 let activeMapEntry    = null;   // { name, texture, imageData, width, height, isCustom? }
+let _lastCustomMap    = null;   // most recent uploaded/imported custom-map entry, kept across preset switches so the thumbnail can re-activate it
 let previewMaterial   = null;
 let isExporting       = false;
 let previewDebounce   = null;
@@ -196,6 +198,9 @@ const stlFileInput   = document.getElementById('stl-file-input');
 const textureInput   = document.getElementById('texture-file-input');
 const presetGrid     = document.getElementById('preset-grid');
 const activeMapName  = document.getElementById('active-map-name');
+const customMapRow      = document.getElementById('custom-map-row');
+const customMapSwatch   = document.getElementById('custom-map-swatch');
+const customMapRemoveBtn = document.getElementById('custom-map-remove');
 const meshInfo       = document.getElementById('mesh-info');
 const exportBtn        = document.getElementById('export-btn');
 const export3mfBtn     = document.getElementById('export-3mf-btn');
@@ -447,7 +452,10 @@ const _presetSwatches = IMAGE_PRESETS.map((p, idx) => {
   return swatch;
 });
 
-// Load lightweight thumbnails (~49 KB total), then auto-select Crystal
+// Load lightweight thumbnails (~49 KB total), then auto-select a preset.
+// If localStorage has a persisted preset name, pick that one with defaults
+// suppressed (so the user's saved textureSmoothing / scaleU are preserved);
+// otherwise fall back to the built-in default and apply its defaults.
 loadAllThumbnails().then(thumbs => {
   thumbs.forEach((thumb, idx) => {
     if (!thumb) return;
@@ -458,10 +466,25 @@ loadAllThumbnails().then(thumbs => {
     const placeholder = swatch.querySelector('canvas');
     swatch.replaceChild(thumb.thumbCanvas, placeholder);
   });
-  // Auto-select the default preset
-  const crystalIdx = IMAGE_PRESETS.findIndex(p => p.name === DEFAULT_PRESET_NAME);
-  if (crystalIdx >= 0 && PRESETS[crystalIdx]) {
-    selectPreset(crystalIdx, _presetSwatches[crystalIdx]);
+
+  let persistedName = null;
+  try {
+    const raw = sessionStorage.getItem('bumpmesh-settings');
+    if (raw) persistedName = (JSON.parse(raw) || {}).activeMapName || null;
+  } catch { /* ignore */ }
+
+  let targetIdx = -1;
+  // If the user had ANY map active last session (preset or a since-discarded
+  // custom upload), suppress preset defaults so the restored settings survive
+  // — we'd otherwise clobber textureSmoothing / scaleU when falling back.
+  let applyDefaults = !persistedName;
+  if (persistedName) {
+    targetIdx = IMAGE_PRESETS.findIndex(p => p.name === persistedName);
+    if (!(targetIdx >= 0 && PRESETS[targetIdx])) targetIdx = -1;
+  }
+  if (targetIdx < 0) targetIdx = IMAGE_PRESETS.findIndex(p => p.name === DEFAULT_PRESET_NAME);
+  if (targetIdx >= 0 && PRESETS[targetIdx]) {
+    selectPreset(targetIdx, _presetSwatches[targetIdx], applyDefaults);
   }
 }).catch(err => console.error('Failed to load thumbnails:', err));
 
@@ -475,7 +498,7 @@ function resetTextureSmoothing() {
 
 let _selectGeneration = 0;   // debounce rapid preset clicks
 
-async function selectPreset(idx, swatchEl) {
+async function selectPreset(idx, swatchEl, applyDefaults = true) {
   const gen = ++_selectGeneration;
   document.querySelectorAll('.preset-swatch').forEach(s => s.classList.remove('active'));
   swatchEl.classList.add('active');
@@ -483,8 +506,10 @@ async function selectPreset(idx, swatchEl) {
   const entry = PRESETS[idx];
   if (!entry) return;
   activeMapName.textContent = entry.name;
-  resetTextureSmoothing();
-  if (entry.defaultScale != null) _applyScaleU(entry.defaultScale);
+  if (applyDefaults) {
+    resetTextureSmoothing();
+    if (entry.defaultScale != null) _applyScaleU(entry.defaultScale);
+  }
 
   // If full texture is already loaded, use it directly
   if (entry.texture) {
@@ -506,6 +531,75 @@ async function selectPreset(idx, swatchEl) {
     console.error('Failed to load full texture:', err);
     swatchEl.classList.remove('preset-loading-full');
   }
+}
+
+// ── Custom-map thumbnail (below the upload button) ───────────────────────────
+
+/** Paint a small preview canvas of the custom map and reveal the thumbnail row. */
+function _showCustomMapThumb(entry) {
+  if (!entry || !entry.fullCanvas || !customMapSwatch) return;
+  customMapSwatch.innerHTML = '';
+  const THUMB_SIZE = 80;
+  const thumb = document.createElement('canvas');
+  thumb.width = THUMB_SIZE; thumb.height = THUMB_SIZE;
+  const ctx = thumb.getContext('2d');
+  // Aspect-fit the source canvas inside the square thumbnail.
+  const sw = entry.fullCanvas.width, sh = entry.fullCanvas.height;
+  const scale = Math.min(THUMB_SIZE / sw, THUMB_SIZE / sh);
+  const dw = sw * scale, dh = sh * scale;
+  ctx.drawImage(entry.fullCanvas, (THUMB_SIZE - dw) / 2, (THUMB_SIZE - dh) / 2, dw, dh);
+  customMapSwatch.appendChild(thumb);
+
+  const label = document.createElement('span');
+  label.className = 'preset-label';
+  label.textContent = entry.name;
+  customMapSwatch.appendChild(label);
+
+  customMapSwatch.title = entry.name;
+  customMapRow.classList.remove('hidden');
+}
+
+function _hideCustomMapThumb() {
+  if (!customMapRow) return;
+  customMapRow.classList.add('hidden');
+  if (customMapSwatch) customMapSwatch.innerHTML = '';
+}
+
+/** Promote the kept-aside custom map back to the active map. No defaults reset. */
+function _activateCustomMap() {
+  if (!_lastCustomMap) return;
+  activeMapEntry = _lastCustomMap;
+  document.querySelectorAll('.preset-swatch').forEach(s => s.classList.remove('active'));
+  customMapSwatch.classList.add('active');
+  activeMapName.textContent = _lastCustomMap.name;
+  updatePreview();
+}
+
+if (customMapSwatch) {
+  customMapSwatch.addEventListener('click', _activateCustomMap);
+  customMapSwatch.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); _activateCustomMap(); }
+  });
+}
+
+if (customMapRemoveBtn) {
+  customMapRemoveBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const wasActive = activeMapEntry === _lastCustomMap;
+    _lastCustomMap = null;
+    _hideCustomMapThumb();
+    if (wasActive) {
+      // Fall back to the default preset so the viewer keeps a usable texture.
+      const idx = IMAGE_PRESETS.findIndex(p => p.name === DEFAULT_PRESET_NAME);
+      if (idx >= 0 && _presetSwatches[idx] && PRESETS[idx]) {
+        selectPreset(idx, _presetSwatches[idx], /*applyDefaults=*/false);
+      } else {
+        activeMapEntry = null;
+        activeMapName.textContent = t('ui.noMapSelected');
+        updatePreview();
+      }
+    }
+  });
 }
 
 // ── Accessibility: Modal focus trap ───────────────────────────────────────────
@@ -551,7 +645,10 @@ function wireEvents() {
   dropZone.addEventListener('drop', (e) => {
     e.preventDefault();
     dropZone.classList.remove('drag-over');
-    const file = [...e.dataTransfer.files].find(f => /\.(stl|obj|3mf)$/i.test(f.name));
+    const files = [...e.dataTransfer.files];
+    const bmFile = files.find(f => /\.bumpmesh$/i.test(f.name));
+    if (bmFile) { importProject(bmFile).catch(err => alert(t('alerts.importFailed', { msg: err.message }))); return; }
+    const file = files.find(f => /\.(stl|obj|3mf)$/i.test(f.name));
     if (file) handleModelFile(file);
   });
 
@@ -596,13 +693,18 @@ function wireEvents() {
     try {
       activeMapEntry = await loadCustomTexture(file);
       activeMapEntry.isCustom = true;
+      _lastCustomMap = activeMapEntry;
       activeMapName.textContent = file.name;
       document.querySelectorAll('.preset-swatch').forEach(s => s.classList.remove('active'));
+      _showCustomMapThumb(activeMapEntry);
+      customMapSwatch.classList.add('active');
       resetTextureSmoothing();
       updatePreview();
     } catch (err) {
       console.error('Failed to load texture:', err);
     }
+    // Reset the file input so re-uploading the same filename still triggers 'change'.
+    textureInput.value = '';
   });
 
   // ── Settings ──
@@ -2080,15 +2182,11 @@ async function handleModelFile(file) {
     buildSpatialGrid(triangleCentroids, geometry.attributes.position.count / 3, bounds);
     updateMeshDiagnostics(adjData, geometry.attributes.position.count / 3);
 
-    // Reset scale & offset sliders so scale=1 = one tile covers the full bounding box
-    const resetVal = (slider, valEl, value) => {
-      slider.value = value;
-      valEl.value = value;
-    };
-    settings.scaleU  = 0.5; scaleUSlider.value = scaleToPos(0.5); scaleUVal.value = 0.5;
-    settings.scaleV  = 0.5; scaleVSlider.value = scaleToPos(0.5); scaleVVal.value = 0.5;
-    settings.offsetU = 0; resetVal(offsetUSlider, offsetUVal, 0);
-    settings.offsetV = 0; resetVal(offsetVSlider, offsetVVal, 0);
+    // Carry scale, offset, rotation, and all other tuning across model swaps —
+    // they're normalized to the bounding box so they apply meaningfully to the
+    // new mesh. Output resolution is the one exception: it's recomputed below
+    // from the new model's diagonal so a default-sized edge length still makes
+    // sense whether the user just loaded a thumb-sized part or a 1m piece.
     triLimitWarning.classList.add('hidden');
 
     // Default edge length = 1/250 of the bounding box diagonal
@@ -3578,3 +3676,431 @@ function runAsync(fn) {
 function yieldFrame() {
   return new Promise(r => setTimeout(r, 0));
 }
+
+// ── Project save/load (.bumpmesh) + sessionStorage auto-save ────────────────
+// .bumpmesh is a ZIP containing: settings.json (required), model.stl (optional),
+// texture.png (optional custom displacement map). Settings alone are also
+// auto-persisted to sessionStorage — so a reload inside the same tab restores
+// the session, but closing the tab (or opening a fresh one later) starts from
+// defaults. One-time migration wipes any legacy localStorage payload.
+
+const PROJECT_STORAGE_KEY = 'bumpmesh-settings';
+const PROJECT_VERSION     = 1;
+const PROJECT_MAX_IMPORT  = 500 * 1024 * 1024; // 500 MB cap on imports
+try { localStorage.removeItem(PROJECT_STORAGE_KEY); } catch { /* ignore */ }
+
+// Persisted setting keys — excludes `useDisplacement` (transient UI state).
+const PERSISTED_KEYS = [
+  'mappingMode', 'scaleU', 'scaleV', 'lockScale',
+  'offsetU', 'offsetV', 'rotation',
+  'amplitude', 'textureHeight', 'invertDisplacement',
+  'symmetricDisplacement', 'textureSmoothing',
+  'mappingBlend', 'seamBandWidth', 'capAngle', 'boundaryFalloff',
+  'bottomAngleLimit', 'topAngleLimit',
+  'refineLength', 'maxTriangles',
+];
+
+function getSettingsSnapshot() {
+  const snap = {};
+  for (const k of PERSISTED_KEYS) snap[k] = settings[k];
+  if (activeMapEntry) {
+    snap.activeMapName = activeMapEntry.name;
+  } else {
+    // Thumbnails may not have finished loading yet; preserve any previously
+    // persisted preset name so a mid-load autosave doesn't wipe it.
+    try {
+      const prev = JSON.parse(sessionStorage.getItem(PROJECT_STORAGE_KEY) || 'null');
+      snap.activeMapName = (prev && prev.activeMapName) || null;
+    } catch { snap.activeMapName = null; }
+  }
+  return snap;
+}
+
+/**
+ * Apply a settings snapshot to the live UI. Drives each control through the
+ * same event it fires on user input (via dispatchEvent), so linkSlider's
+ * clamp/display/preview flow runs unchanged.
+ */
+function applySettingsSnapshot(snap) {
+  if (!snap) return;
+
+  // Mapping mode first — changes cap-angle row visibility and triggers preview.
+  if (snap.mappingMode != null) {
+    mappingSelect.value = String(snap.mappingMode);
+    mappingSelect.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  // invertDisplacement BEFORE amplitude — the amplitude setter reads the flag.
+  if (snap.invertDisplacement != null) {
+    invertDisplacementCheckbox.checked = snap.invertDisplacement;
+    invertDisplacementCheckbox.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  // Temporarily disable lockScale so U and V can be set independently without
+  // one mirroring the other; restore the saved lock state afterwards.
+  const wantLock = snap.lockScale != null ? snap.lockScale : settings.lockScale;
+  settings.lockScale = false;
+
+  const setLinkedVal = (inputEl, value) => {
+    if (inputEl && value != null) {
+      inputEl.value = value;
+      inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  };
+
+  setLinkedVal(scaleUVal,           snap.scaleU);
+  setLinkedVal(scaleVVal,           snap.scaleV);
+  setLinkedVal(offsetUVal,          snap.offsetU);
+  setLinkedVal(offsetVVal,          snap.offsetV);
+  setLinkedVal(rotationVal,         snap.rotation);
+  setLinkedVal(amplitudeVal,        snap.textureHeight);
+  setLinkedVal(textureSmoothingVal, snap.textureSmoothing);
+  setLinkedVal(seamBlendVal,        snap.mappingBlend);
+  setLinkedVal(seamBandWidthVal,    snap.seamBandWidth);
+  setLinkedVal(capAngleVal,         snap.capAngle);
+  setLinkedVal(boundaryFalloffVal,  snap.boundaryFalloff);
+  setLinkedVal(bottomAngleLimitVal, snap.bottomAngleLimit);
+  setLinkedVal(topAngleLimitVal,    snap.topAngleLimit);
+  setLinkedVal(refineLenVal,        snap.refineLength);
+
+  // maxTriangles uses a <span> for its display, so linkSlider wires it via
+  // the slider's 'input' event, not a val-input 'change'.
+  if (snap.maxTriangles != null) {
+    maxTriSlider.value = snap.maxTriangles;
+    maxTriSlider.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  // Restore saved lock state without invoking the button's click handler
+  // (which would mirror scaleU→scaleV and clobber what we just set).
+  settings.lockScale = wantLock;
+  lockScaleBtn.classList.toggle('active', wantLock);
+  lockScaleBtn.setAttribute('aria-pressed', String(wantLock));
+
+  // Checkboxes
+  if (snap.symmetricDisplacement != null) {
+    symmetricDispToggle.checked = snap.symmetricDisplacement;
+    symmetricDispToggle.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+}
+
+/**
+ * Find a preset by name and activate it. By default, suppresses preset defaults
+ * (resetTextureSmoothing + defaultScale override) so a just-restored snapshot
+ * isn't clobbered. Pass applyDefaults=true for fresh user-initiated picks.
+ */
+function _selectPresetByName(name, applyDefaults = false) {
+  if (!name) return false;
+  const idx = IMAGE_PRESETS.findIndex(p => p.name === name);
+  if (idx < 0) return false;
+  const swatch = _presetSwatches[idx];
+  if (!swatch) return false;
+  selectPreset(idx, swatch, applyDefaults);
+  return true;
+}
+
+// ── localStorage auto-save ───────────────────────────────────────────────────
+
+let _autoSaveTimer = null;
+let _autoSavePaused = false;
+function _autoSaveSettings() {
+  if (_autoSavePaused) return;
+  clearTimeout(_autoSaveTimer);
+  _autoSaveTimer = setTimeout(() => {
+    try {
+      const payload = { version: PROJECT_VERSION, ...getSettingsSnapshot() };
+      sessionStorage.setItem(PROJECT_STORAGE_KEY, JSON.stringify(payload));
+    } catch { /* quota exceeded or disabled — ignore */ }
+  }, 300);
+}
+
+function _restoreSessionSettings() {
+  let raw;
+  try { raw = sessionStorage.getItem(PROJECT_STORAGE_KEY); }
+  catch { return; }
+  if (!raw) return;
+  let data;
+  try { data = JSON.parse(raw); } catch { return; }
+  if (!data || typeof data !== 'object') return;
+  applySettingsSnapshot(data);
+  // Preset activation is handled by the thumbnail-load auto-select path —
+  // it reads activeMapName from sessionStorage and suppresses defaults so
+  // the user's saved scaleU / textureSmoothing survive.
+}
+
+// Delegate auto-save to input/change bubbling in the settings panel —
+// covers every slider, number input, select, and checkbox in one shot.
+const _settingsPanel = document.getElementById('settings-panel');
+if (_settingsPanel) {
+  _settingsPanel.addEventListener('input', _autoSaveSettings);
+  _settingsPanel.addEventListener('change', _autoSaveSettings);
+}
+// The lock-scale button doesn't emit input/change — catch it separately.
+lockScaleBtn.addEventListener('click', _autoSaveSettings);
+
+// ── Reset to defaults ───────────────────────────────────────────────────────
+// Frozen snapshot of the initial `settings` object plus the default preset
+// name, so the reset button restores exactly what a fresh session starts with.
+
+const DEFAULT_SETTINGS_SNAPSHOT = Object.freeze({
+  mappingMode: 5, scaleU: 0.5, scaleV: 0.5, lockScale: true,
+  offsetU: 0, offsetV: 0, rotation: 0,
+  amplitude: 0.5, textureHeight: 0.5, invertDisplacement: false,
+  symmetricDisplacement: false, textureSmoothing: 0,
+  mappingBlend: 1, seamBandWidth: 0.5, capAngle: 20, boundaryFalloff: 0,
+  bottomAngleLimit: 5, topAngleLimit: 0,
+  refineLength: 1, maxTriangles: 750000,
+  activeMapName: DEFAULT_PRESET_NAME,
+});
+
+function resetSettingsToDefaults() {
+  // Pause autosave so each intermediate change event doesn't queue a save;
+  // we clear sessionStorage explicitly below.
+  _autoSavePaused = true;
+  try {
+    // Match handleModelFile: refineLength defaults to ~1/250 of the loaded
+    // model's bounding-box diagonal, clamped to [0.05, 5.0]. Without this the
+    // reset would clobber a sensibly-tuned resolution back to the literal 1.0.
+    const snapshot = { ...DEFAULT_SETTINGS_SNAPSHOT };
+    if (currentBounds && currentBounds.size) {
+      const sz = currentBounds.size;
+      const diag = Math.sqrt(sz.x * sz.x + sz.y * sz.y + sz.z * sz.z);
+      snapshot.refineLength = Math.max(0.05, Math.min(5.0, +(diag / 250).toFixed(2)));
+    }
+    applySettingsSnapshot(snapshot);
+
+    // Clear any painted mask and revert to Exclude mode. setSelectionMode
+    // also clears the face sets, but only when the mode actually changes —
+    // run explicit resets afterwards so we always end up empty.
+    if (selectionMode) setSelectionMode(false);
+    excludedFaces          = new Set();
+    precisionExcludedFaces = new Set();
+    if (currentGeometry) refreshExclusionOverlay();
+
+    const defaultIdx = IMAGE_PRESETS.findIndex(p => p.name === DEFAULT_PRESET_NAME);
+    if (defaultIdx >= 0 && _presetSwatches[defaultIdx] && PRESETS[defaultIdx]) {
+      // applyDefaults=true so the preset's defaultScale overrides whatever
+      // scale the user had — matches the "fresh session" intent.
+      selectPreset(defaultIdx, _presetSwatches[defaultIdx], true);
+    }
+    try { sessionStorage.removeItem(PROJECT_STORAGE_KEY); } catch { /* ignore */ }
+  } finally {
+    _autoSavePaused = false;
+  }
+}
+
+const resetSettingsBtn = document.getElementById('reset-settings-btn');
+if (resetSettingsBtn) {
+  resetSettingsBtn.addEventListener('click', () => {
+    if (confirm(t('alerts.resetConfirm'))) resetSettingsToDefaults();
+  });
+}
+
+// ── Export: build .bumpmesh ZIP and trigger download ─────────────────────────
+
+const exportProjectBtn  = document.getElementById('export-project-btn');
+const exportDialog      = document.getElementById('export-dialog');
+const exportGoBtn       = document.getElementById('export-go-btn');
+const exportModelChk    = document.getElementById('export-model-chk');
+const exportTextureChk  = document.getElementById('export-texture-chk');
+const exportTextureRow  = document.getElementById('export-texture-row');
+const importProjectInput = document.getElementById('import-project-input');
+
+exportProjectBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  // Offer custom-texture export whenever one has been uploaded this session,
+  // even if a preset is currently active — _lastCustomMap survives preset switches.
+  const hasCustom = !!(_lastCustomMap && _lastCustomMap.fullCanvas);
+  exportModelChk.disabled = !currentGeometry;
+  if (!currentGeometry) exportModelChk.checked = false;
+  exportTextureRow.classList.toggle('hidden', !hasCustom);
+  if (!hasCustom) exportTextureChk.checked = false;
+  exportDialog.classList.toggle('hidden');
+});
+
+// Close dialog on outside click.
+document.addEventListener('click', (e) => {
+  if (exportDialog.classList.contains('hidden')) return;
+  if (!exportDialog.contains(e.target) && e.target !== exportProjectBtn && !exportProjectBtn.contains(e.target)) {
+    exportDialog.classList.add('hidden');
+  }
+});
+
+exportGoBtn.addEventListener('click', async () => {
+  exportDialog.classList.add('hidden');
+  try {
+    const includeModel   = exportModelChk.checked && !!currentGeometry;
+    const customSource   = (_lastCustomMap && _lastCustomMap.fullCanvas) ? _lastCustomMap : null;
+    const includeTexture = exportTextureChk.checked && !!customSource;
+
+    const payload = { version: PROJECT_VERSION, ...getSettingsSnapshot() };
+    // Mark the custom map as the active reference so the importer restores it
+    // even if the user has a preset selected at export time.
+    if (includeTexture) payload.activeMapName = customSource.name;
+    const zipFiles = { 'settings.json': strToU8(JSON.stringify(payload, null, 2)) };
+
+    if (includeModel) {
+      zipFiles['model.stl'] = _geometryToBinarySTL(currentGeometry);
+      // Mask indices reference the base geometry's triangles, so they only make
+      // sense when shipped alongside the model that produced them.
+      const mask = _collectCurrentMask();
+      if (mask) zipFiles['mask.json'] = strToU8(JSON.stringify(mask));
+    }
+    if (includeTexture) {
+      const blob = await new Promise(r => customSource.fullCanvas.toBlob(r, 'image/png'));
+      zipFiles['texture.png'] = new Uint8Array(await blob.arrayBuffer());
+    }
+
+    const zipped = zipSync(zipFiles);
+    _downloadBlob(new Blob([zipped], { type: 'application/octet-stream' }),
+                  (currentStlName || 'bumpmesh') + '.bumpmesh');
+  } catch (err) {
+    alert(t('alerts.exportFailed', { msg: err.message }));
+  }
+});
+
+/** Pack a BufferGeometry into binary-STL bytes (80-byte header, uint32 count, 50 bytes per triangle). */
+function _geometryToBinarySTL(geo) {
+  const pos = geo.attributes.position.array;
+  const nor = geo.attributes.normal ? geo.attributes.normal.array : null;
+  const triCount = (pos.length / 9) | 0;
+  const buf = new ArrayBuffer(84 + 50 * triCount);
+  const bytes = new Uint8Array(buf);
+  const view = new DataView(buf);
+  view.setUint32(80, triCount, true);
+  // Copy per-triangle normal + 3 vertex positions. If no normal attribute,
+  // leave the normal slot as zeros — slicers compute per-face normals anyway.
+  for (let i = 0; i < triCount; i++) {
+    const dst = 84 + i * 50;
+    const srcPos = i * 9;
+    if (nor) {
+      const srcNor = i * 9;
+      view.setFloat32(dst,     nor[srcNor],     true);
+      view.setFloat32(dst + 4, nor[srcNor + 1], true);
+      view.setFloat32(dst + 8, nor[srcNor + 2], true);
+    }
+    for (let v = 0; v < 3; v++) {
+      const d = dst + 12 + v * 12;
+      view.setFloat32(d,     pos[srcPos + v * 3],     true);
+      view.setFloat32(d + 4, pos[srcPos + v * 3 + 1], true);
+      view.setFloat32(d + 8, pos[srcPos + v * 3 + 2], true);
+    }
+  }
+  return bytes;
+}
+
+/**
+ * Snapshot the current paint mask (selection mode + excluded face indices into
+ * the *base* geometry). Returns null when there's nothing meaningful to save —
+ * i.e. exclude-mode with no painted faces.
+ *
+ * If precision masking is active, collapse `precisionExcludedFaces` back to
+ * base-geometry indices via `precisionParentMap`, mirroring the collapse that
+ * happens when the user disables precision (line 3193).
+ */
+function _collectCurrentMask() {
+  let liveExcluded;
+  if (precisionMaskingEnabled && precisionParentMap && precisionExcludedFaces.size > 0) {
+    liveExcluded = new Set();
+    for (const pf of precisionExcludedFaces) liveExcluded.add(precisionParentMap[pf]);
+  } else {
+    liveExcluded = excludedFaces;
+  }
+  // Include-mode with zero painted = "mask everything" — also worth preserving.
+  if (liveExcluded.size === 0 && !selectionMode) return null;
+  return { selectionMode, excluded: [...liveExcluded] };
+}
+
+/**
+ * Apply a saved mask to the currently-loaded geometry. Filters out indices
+ * that would be out-of-range for the loaded mesh (defensive — the .bumpmesh
+ * file always ships its own model, but we still validate).
+ */
+function _restoreMask(mask) {
+  if (!mask || !currentGeometry) return;
+  const triCount = (currentGeometry.attributes.position.count / 3) | 0;
+  // setSelectionMode clears any current paint, so flip mode FIRST then seed.
+  if (mask.selectionMode === true)  setSelectionMode(true);
+  else if (mask.selectionMode === false && selectionMode) setSelectionMode(false);
+
+  const valid = (Array.isArray(mask.excluded) ? mask.excluded : [])
+    .filter(i => Number.isInteger(i) && i >= 0 && i < triCount);
+  excludedFaces = new Set(valid);
+  precisionExcludedFaces = new Set(); // precision rebuilds from this on demand
+  refreshExclusionOverlay();
+}
+
+function _downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+// ── Import ───────────────────────────────────────────────────────────────────
+
+importProjectInput.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  importProjectInput.value = ''; // reset so the same file can be re-imported
+  try { await importProject(file); }
+  catch (err) { alert(t('alerts.importFailed', { msg: err.message })); }
+});
+
+async function importProject(file) {
+  if (file.size > PROJECT_MAX_IMPORT) {
+    throw new Error(`File too large (${(file.size / 1024 / 1024).toFixed(1)} MB, max 500 MB)`);
+  }
+  const buf = await file.arrayBuffer();
+  const unzipped = unzipSync(new Uint8Array(buf));
+
+  const settingsBytes = unzipped['settings.json'];
+  const data = settingsBytes ? JSON.parse(strFromU8(settingsBytes)) : null;
+
+  // 1) Load model first — handleModelFile resets scaleU/scaleV/offsets/refineLength
+  //    AND clears any existing paint mask, so applied settings + restored mask
+  //    below will correctly override those resets.
+  const hasModel = !!unzipped['model.stl'];
+  if (hasModel) {
+    const stlFile = new File([unzipped['model.stl']], 'model.stl', { type: 'application/octet-stream' });
+    await handleModelFile(stlFile);
+  }
+
+  // 2) Apply settings after any model reset.
+  if (data) applySettingsSnapshot(data);
+
+  // 2b) Restore paint mask — only meaningful when the project shipped a model,
+  //     since indices reference that exact triangle set.
+  if (hasModel && unzipped['mask.json']) {
+    try {
+      const mask = JSON.parse(strFromU8(unzipped['mask.json']));
+      _restoreMask(mask);
+    } catch (err) { console.warn('Could not restore paint mask:', err); }
+  }
+
+  // 3) Texture: custom PNG wins over named preset.
+  if (unzipped['texture.png']) {
+    const texName = (data && data.activeMapName) || 'imported-texture.png';
+    const texFile = new File([unzipped['texture.png']], texName, { type: 'image/png' });
+    activeMapEntry = await loadCustomTexture(texFile);
+    activeMapEntry.isCustom = true;
+    activeMapEntry.name = texName;
+    _lastCustomMap = activeMapEntry;
+    activeMapName.textContent = texName;
+    document.querySelectorAll('.preset-swatch').forEach(s => s.classList.remove('active'));
+    _showCustomMapThumb(activeMapEntry);
+    customMapSwatch.classList.add('active');
+    updatePreview();
+  } else if (data && data.activeMapName) {
+    _selectPresetByName(data.activeMapName);
+  }
+
+  _autoSaveSettings();
+}
+
+// Restore last session's settings on startup.
+_restoreSessionSettings();

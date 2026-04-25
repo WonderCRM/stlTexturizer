@@ -13,6 +13,8 @@ export default {
   "sections.displacementMap": "Textur",
   "ui.uploadCustomMap": "Eigene Textur hochladen",
   "ui.noMapSelected": "Keine Textur ausgewählt",
+  "ui.customMap": "Eigene Textur",
+  "ui.removeCustomMap": "Eigene Textur entfernen",
   "ui.loadingTextures": "Texturen werden geladen…",
   "sections.projection": "Projektion",
   "labels.mode": "Modus",
@@ -168,5 +170,14 @@ export default {
   "diag.advancedOk": "\u2714 Keine Schnitte oder Überlappungen gefunden",
   "diag.recommendFix": "Beheben Sie diese Probleme in Ihrer CAD-Software, Ihrem Slicer oder <a href=\"https://www.formware.co/onlinestlrepair\" target=\"_blank\" rel=\"noopener\">online</a> vor dem Texturieren.",
   "diag.show": "Zeigen",
-  "diag.hide": "Ausbl."
+  "diag.hide": "Ausbl.",
+  "header.exportProject": "Projekt speichern (.bumpmesh)",
+  "header.importProject": "Projekt laden (.bumpmesh)",
+  "header.resetSettings": "Auf Standard zurücksetzen",
+  "alerts.resetConfirm": "Alle Einstellungen auf Standardwerte zurücksetzen?",
+  "header.exportSettingsLabel": "Einstellungen",
+  "header.exportModelLabel": "Modell (STL)",
+  "header.exportTextureLabel": "Eigene Textur",
+  "header.exportGo": "Speichern",
+  "alerts.importFailed": "Projekt konnte nicht geladen werden: {msg}"
 };

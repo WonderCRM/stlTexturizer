@@ -35,6 +35,24 @@
       <span>BumpMesh <small style="opacity:.6;font-weight:400">by <a href="https://www.youtube.com/@CNCKitchen" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:underline">CNC Kitchen</a></small></span>
     </div>
     <div class="header-actions">
+      <div class="project-io">
+        <button id="reset-settings-btn" class="icon-btn" data-i18n-title="header.resetSettings" title="Reset settings to defaults">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><polyline points="3 3 3 9 9 9"/></svg>
+        </button>
+        <button id="export-project-btn" class="icon-btn" data-i18n-title="header.exportProject" title="Save project (.bumpmesh)">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        </button>
+        <input type="file" id="import-project-input" accept=".bumpmesh" hidden />
+        <label for="import-project-input" class="icon-btn" data-i18n-title="header.importProject" title="Load project (.bumpmesh)" role="button" tabindex="0">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        </label>
+        <div id="export-dialog" class="export-dialog hidden">
+          <label><input type="checkbox" id="export-settings-chk" checked disabled /> <span data-i18n="header.exportSettingsLabel">Settings</span></label>
+          <label><input type="checkbox" id="export-model-chk" checked /> <span data-i18n="header.exportModelLabel">Model (STL)</span></label>
+          <label id="export-texture-row" class="hidden"><input type="checkbox" id="export-texture-chk" checked /> <span data-i18n="header.exportTextureLabel">Custom texture</span></label>
+          <button id="export-go-btn" class="export-go-btn" data-i18n="header.exportGo">Save</button>
+        </div>
+      </div>
       <div class="lang-seg">
       </div>
       <button id="theme-toggle" class="theme-toggle"
@@ -152,6 +170,12 @@
           <span data-i18n="ui.uploadCustomMap">Upload custom map</span>
         </label>
         <input type="file" id="texture-file-input" accept="image/*" hidden />
+        <div id="custom-map-row" class="custom-map-row hidden">
+          <div id="custom-map-swatch" class="preset-swatch custom-map-swatch" role="button" tabindex="0" data-i18n-title="ui.customMap" title="Custom map"></div>
+          <button id="custom-map-remove" class="custom-map-remove" data-i18n-title="ui.removeCustomMap" data-i18n-aria-label="ui.removeCustomMap" title="Remove custom map" aria-label="Remove custom map">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
         <div id="active-map-name" class="active-map-name" data-i18n="ui.noMapSelected">No map selected</div>
         <div class="form-row slider-row">
           <label for="texture-smoothing" data-i18n="labels.textureSmoothing" data-i18n-title="tooltips.textureSmoothing" title="Applies a Gaussian blur to the displacement map. Higher values produce softer, more gradual surface detail. 0 = off.">Texture Smoothing ⓘ</label>

@@ -13,6 +13,8 @@ export default {
   "sections.displacementMap": "Carte de déplacement",
   "ui.uploadCustomMap": "Charger une carte personnalisée",
   "ui.noMapSelected": "Aucune carte sélectionnée",
+  "ui.customMap": "Carte personnalisée",
+  "ui.removeCustomMap": "Supprimer la carte personnalisée",
   "ui.loadingTextures": "Chargement des textures…",
   "sections.projection": "Projection",
   "labels.mode": "Mode",
@@ -168,5 +170,14 @@ export default {
   "diag.advancedOk": "\u2714 Aucune intersection ni superposition trouvée",
   "diag.recommendFix": "Corrigez ces probl\u00e8mes dans votre logiciel CAO, slicer ou <a href=\"https://www.formware.co/onlinestlrepair\" target=\"_blank\" rel=\"noopener\">en ligne</a> avant la texturation.",
   "diag.show": "Afficher",
-  "diag.hide": "Masquer"
+  "diag.hide": "Masquer",
+  "header.exportProject": "Enregistrer le projet (.bumpmesh)",
+  "header.importProject": "Charger le projet (.bumpmesh)",
+  "header.resetSettings": "Réinitialiser aux valeurs par défaut",
+  "alerts.resetConfirm": "Réinitialiser tous les paramètres à leurs valeurs par défaut ?",
+  "header.exportSettingsLabel": "Paramètres",
+  "header.exportModelLabel": "Modèle (STL)",
+  "header.exportTextureLabel": "Texture personnalisée",
+  "header.exportGo": "Enregistrer",
+  "alerts.importFailed": "Impossible de charger le projet : {msg}"
 };

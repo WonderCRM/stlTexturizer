@@ -13,6 +13,8 @@ export default {
   "sections.displacementMap": "디스플레이스먼트 맵",
   "ui.uploadCustomMap": "사용자 맵 업로드",
   "ui.noMapSelected": "선택된 맵 없음",
+  "ui.customMap": "사용자 맵",
+  "ui.removeCustomMap": "사용자 맵 제거",
   "ui.loadingTextures": "텍스처 불러오는 중…",
   "sections.projection": "투영",
   "labels.mode": "모드",
@@ -168,5 +170,14 @@ export default {
   "diag.advancedOk": "✔ 교차 또는 중첩이 발견되지 않았습니다",
   "diag.recommendFix": "텍스처링 전에 CAD 소프트웨어, 슬라이서 또는 <a href=\"https://www.formware.co/onlinestlrepair\" target=\"_blank\" rel=\"noopener\">온라인</a> 도구에서 이러한 문제를 수정하세요.",
   "diag.show": "표시",
-  "diag.hide": "숨기기"
+  "diag.hide": "숨기기",
+  "header.exportProject": "프로젝트 저장 (.bumpmesh)",
+  "header.importProject": "프로젝트 불러오기 (.bumpmesh)",
+  "header.resetSettings": "기본값으로 재설정",
+  "alerts.resetConfirm": "모든 설정을 기본값으로 재설정하시겠습니까?",
+  "header.exportSettingsLabel": "설정",
+  "header.exportModelLabel": "모델 (STL)",
+  "header.exportTextureLabel": "사용자 텍스처",
+  "header.exportGo": "저장",
+  "alerts.importFailed": "프로젝트를 불러올 수 없습니다: {msg}"
 };

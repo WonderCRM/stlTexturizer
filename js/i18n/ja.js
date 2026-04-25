@@ -13,6 +13,8 @@ export default {
   "sections.displacementMap": "ディスプレイスメントマップ",
   "ui.uploadCustomMap": "カスタムマップをアップロード",
   "ui.noMapSelected": "マップが選択されていません",
+  "ui.customMap": "カスタムマップ",
+  "ui.removeCustomMap": "カスタムマップを削除",
   "ui.loadingTextures": "テクスチャを読み込み中…",
   "sections.projection": "投影",
   "labels.mode": "モード",
@@ -168,5 +170,14 @@ export default {
   "diag.advancedOk": "\u2714 交差や重複は見つかりませんでした",
   "diag.recommendFix": "テクスチャリング前にCADソフトウェア、スライサー、または<a href=\"https://www.formware.co/onlinestlrepair\" target=\"_blank\" rel=\"noopener\">オンライン</a>でこれらの問題を修正してください。",
   "diag.show": "表示",
-  "diag.hide": "非表示"
+  "diag.hide": "非表示",
+  "header.exportProject": "プロジェクトを保存 (.bumpmesh)",
+  "header.importProject": "プロジェクトを読み込み (.bumpmesh)",
+  "header.resetSettings": "デフォルトに戻す",
+  "alerts.resetConfirm": "すべての設定をデフォルト値に戻しますか？",
+  "header.exportSettingsLabel": "設定",
+  "header.exportModelLabel": "モデル (STL)",
+  "header.exportTextureLabel": "カスタムテクスチャ",
+  "header.exportGo": "保存",
+  "alerts.importFailed": "プロジェクトを読み込めませんでした: {msg}"
 };

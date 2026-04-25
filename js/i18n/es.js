@@ -13,6 +13,8 @@ export default {
   "sections.displacementMap": "Mapa de desplazamiento",
   "ui.uploadCustomMap": "Subir mapa personalizado",
   "ui.noMapSelected": "Ningún mapa seleccionado",
+  "ui.customMap": "Mapa personalizado",
+  "ui.removeCustomMap": "Eliminar mapa personalizado",
   "ui.loadingTextures": "Cargando texturas…",
   "sections.projection": "Proyección",
   "labels.mode": "Modo",
@@ -168,5 +170,14 @@ export default {
   "diag.advancedOk": "\u2714 No se encontraron intersecciones ni superposiciones",
   "diag.recommendFix": "Corrija estos problemas en su software CAD, slicer o <a href=\"https://www.formware.co/onlinestlrepair\" target=\"_blank\" rel=\"noopener\">en l\u00ednea</a> antes de texturizar.",
   "diag.show": "Mostrar",
-  "diag.hide": "Ocultar"
+  "diag.hide": "Ocultar",
+  "header.exportProject": "Guardar proyecto (.bumpmesh)",
+  "header.importProject": "Cargar proyecto (.bumpmesh)",
+  "header.resetSettings": "Restablecer valores predeterminados",
+  "alerts.resetConfirm": "¿Restablecer todos los ajustes a sus valores predeterminados?",
+  "header.exportSettingsLabel": "Ajustes",
+  "header.exportModelLabel": "Modelo (STL)",
+  "header.exportTextureLabel": "Textura personalizada",
+  "header.exportGo": "Guardar",
+  "alerts.importFailed": "No se pudo cargar el proyecto: {msg}"
 };

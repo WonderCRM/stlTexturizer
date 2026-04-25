@@ -13,6 +13,8 @@ export default {
   "sections.displacementMap": "Displacement Map",
   "ui.uploadCustomMap": "Upload custom map",
   "ui.noMapSelected": "No map selected",
+  "ui.customMap": "Custom map",
+  "ui.removeCustomMap": "Remove custom map",
   "ui.loadingTextures": "Loading textures…",
   "sections.projection": "Projection",
   "labels.mode": "Mode",
@@ -168,5 +170,14 @@ export default {
   "diag.advancedOk": "\u2714 No intersections or overlaps found",
   "diag.recommendFix": "Fix these issues in your CAD software, slicer, or <a href=\"https://www.formware.co/onlinestlrepair\" target=\"_blank\" rel=\"noopener\">online</a> before texturing.",
   "diag.show": "Show",
-  "diag.hide": "Hide"
+  "diag.hide": "Hide",
+  "header.exportProject": "Save project (.bumpmesh)",
+  "header.importProject": "Load project (.bumpmesh)",
+  "header.resetSettings": "Reset to defaults",
+  "alerts.resetConfirm": "Reset all settings to their default values?",
+  "header.exportSettingsLabel": "Settings",
+  "header.exportModelLabel": "Model (STL)",
+  "header.exportTextureLabel": "Custom texture",
+  "header.exportGo": "Save",
+  "alerts.importFailed": "Could not load project: {msg}"
 };
