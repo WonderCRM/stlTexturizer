@@ -299,6 +299,17 @@ const imprintLink    = document.getElementById('imprint-link');
 const imprintOverlay = document.getElementById('imprint-overlay');
 const imprintClose   = document.getElementById('imprint-close');
 
+// ── Welcome / What's New popup ───────────────────────────────────────────────
+// Bump this date whenever the "What's New" bullets in index.html change to
+// re-show the popup to all returning visitors who previously dismissed it.
+const WELCOME_LAST_UPDATED = '2026-04-25';
+const WELCOME_STORAGE_KEY  = 'stlt-welcome-seen';
+const welcomeLink     = document.getElementById('welcome-link');
+const welcomeOverlay  = document.getElementById('welcome-overlay');
+const welcomeClose    = document.getElementById('welcome-close');
+const welcomeGotIt    = document.getElementById('welcome-got-it');
+const welcomeDontShow = document.getElementById('welcome-dont-show');
+
 // ── Language selector DOM refs ────────────────────────────────────────────────────
 const languageSelector = document.querySelector('.lang-seg');
 
@@ -411,6 +422,7 @@ document.getElementById('theme-toggle').addEventListener('click', () => {
 });
 
 wireEvents();
+showWelcomeIfNeeded();
 // Sync scale number inputs with the slider's initial position
 scaleUVal.value = posToScale(parseFloat(scaleUSlider.value));
 scaleVVal.value = posToScale(parseFloat(scaleVSlider.value));
@@ -595,6 +607,31 @@ if (customMapRemoveBtn) {
       }
     }
   });
+}
+
+// ── Welcome popup: open / dismiss ─────────────────────────────────────────────
+function openWelcome({ allowDismissPersist }) {
+  welcomeDontShow.checked = false;
+  welcomeOverlay.classList.remove('hidden');
+  trapFocus(welcomeOverlay);
+
+  const close = () => {
+    if (allowDismissPersist && welcomeDontShow.checked) {
+      try { localStorage.setItem(WELCOME_STORAGE_KEY, WELCOME_LAST_UPDATED); } catch { /* quota / private mode */ }
+    }
+    welcomeOverlay.classList.add('hidden');
+  };
+  welcomeClose.onclick   = close;
+  welcomeGotIt.onclick   = close;
+  welcomeOverlay.onclick = (e) => { if (e.target === welcomeOverlay) close(); };
+}
+
+function showWelcomeIfNeeded() {
+  let seen = null;
+  try { seen = localStorage.getItem(WELCOME_STORAGE_KEY); } catch { /* private mode */ }
+  if (seen !== WELCOME_LAST_UPDATED) {
+    openWelcome({ allowDismissPersist: true });
+  }
 }
 
 // ── Accessibility: Modal focus trap ───────────────────────────────────────────
@@ -830,6 +867,9 @@ function wireEvents() {
   imprintOverlay.addEventListener('click', (e) => {
     if (e.target === imprintOverlay) imprintOverlay.classList.add('hidden');
   });
+
+  // ── Welcome / What's New ──
+  welcomeLink.addEventListener('click', () => openWelcome({ allowDismissPersist: false }));
 
   // ── Mesh diagnostics dismiss ──
   meshDiagDismiss.addEventListener('click', () => {

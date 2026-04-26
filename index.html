@@ -444,6 +444,7 @@
         </div>
       </section>
 
+      <button id="welcome-link" class="license-link">What&rsquo;s New</button>
       <button id="license-link" class="license-link" data-i18n="license.btn">License &amp; Terms</button>
       <button id="imprint-link" class="license-link" data-i18n="imprint.btn">Imprint &amp; Privacy</button>
 
@@ -511,6 +512,39 @@
         <span data-i18n="sponsor.dontShow">Don't show this again</span>
       </label>
       <button id="sponsor-close" class="sponsor-close-btn" data-i18n-html="sponsor.closeAndContinue">Close &amp; Continue</button>
+    </div>
+  </div>
+
+  <!-- Welcome / What's New popup -->
+  <div id="welcome-overlay" class="welcome-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="welcome-title">
+    <div class="welcome-modal">
+      <button id="welcome-close" class="license-close-btn" aria-label="Close">&#215;</button>
+      <h2 id="welcome-title">Welcome to BumpMesh</h2>
+      <p class="welcome-tagline">Add a texture to any of your STLs &mdash; directly in your browser, no cloud and completely free!</p>
+
+      <h3 class="welcome-heading">Quick start</h3>
+      <ol class="welcome-steps">
+        <li>Import an STL, OBJ or 3MF.</li>
+        <li>Pick a texture from the preset library or upload your own image.</li>
+        <li>Tweak amplitude, scale, and mapping mode to taste.</li>
+        <li>Export as STL or 3MF.</li>
+      </ol>
+
+      <h3 class="welcome-heading">New in this release <span class="welcome-date">&mdash; Apr 2026</span></h3>
+      <ul class="welcome-changelog">
+        <li><strong>Mesh Check</strong></li>
+        <li><strong>Undo / redo</strong> with full keyboard shortcuts.</li>
+        <li><strong>Save &amp; load projects</strong> as <code>.bumpmesh</code> files.</li>
+        <li><strong>Smooth masking borders</strong></li>
+        <li><strong>New languages:</strong> Italian, Spanish, Portuguese, Japanese, French, Korean</li>
+        <li>Lots of performance and quality-of-life improvements</li>
+      </ul>
+
+      <label class="sponsor-no-show">
+        <input type="checkbox" id="welcome-dont-show" />
+        <span>Don&rsquo;t show this again until there&rsquo;s something new</span>
+      </label>
+      <button id="welcome-got-it" class="sponsor-close-btn">Got it</button>
     </div>
   </div>
 
