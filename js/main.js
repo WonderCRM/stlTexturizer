@@ -3,7 +3,8 @@ import { initViewer, loadGeometry, setMeshMaterial, setMeshGeometry, setWirefram
          getControls, getCamera, getCurrentMesh,
          setExclusionOverlay, setHoverPreview, setViewerTheme,
          setProjection, requestRender,
-         clearDiagOverlays, setDiagEdges, addDiagFaces } from './viewer.js';
+         clearDiagOverlays, setDiagEdges, addDiagFaces,
+         setRotationGizmo, isGizmoDragging } from './viewer.js';
 import { loadModelFile, computeBounds, getTriangleCount }  from './stlLoader.js';
 import { loadAllThumbnails, loadFullPreset, loadCustomTexture, IMAGE_PRESETS }  from './presetTextures.js';
 import { createPreviewMaterial, updateMaterial } from './previewMaterial.js';
@@ -16,6 +17,7 @@ import { buildAdjacency, bucketFill,
 import { runFastDiagnostics, runExpensiveDiagnostics,
          getEdgePositions, getShellAssignments } from './meshValidation.js';
 import { t, initLang, setLang, getLang, applyTranslations, TRANSLATIONS } from './i18n.js';
+import { zipSync, unzipSync, strToU8, strFromU8 } from 'fflate';
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -23,8 +25,10 @@ let currentGeometry   = null;   // original loaded geometry
 let currentBounds     = null;   // bounds of the original geometry
 let currentStlName    = 'model'; // base filename of the loaded STL (no extension)
 let activeMapEntry    = null;   // { name, texture, imageData, width, height, isCustom? }
+let _lastCustomMap    = null;   // most recent uploaded/imported custom-map entry, kept across preset switches so the thumbnail can re-activate it
 let previewMaterial   = null;
 let isExporting       = false;
+let isBaking          = false;
 let previewDebounce   = null;
 
 // Boundary edge data texture for per-fragment falloff in bump-only preview
@@ -37,7 +41,7 @@ let _falloffGeometry   = null;   // geometry the falloff was last computed for
 let excludedFaces      = new Set();   // triangle indices in currentGeometry
 let triangleAdjacency  = null;        // Array from buildAdjacency
 let triangleCentroids  = null;        // Float32Array from buildAdjacency
-let triangleBoundRadii = null;        // Float32Array — max vertex-to-centroid dist per tri
+let triangleFaceNormals = null;       // Float32Array — local-space unit face normal per tri
 let exclusionTool      = null;        // 'brush' | 'bucket' | null
 let eraseMode          = false;
 let brushIsRadius      = false;
@@ -47,6 +51,9 @@ let isPainting         = false;
 let selectionMode      = false;       // false = exclude painted faces; true = include only painted faces
 let _lastHoverTriIdx   = -1;          // last triangle index used for hover preview
 let placeOnFaceActive  = false;       // true while "Place on Face" mode is active
+let rotateActive       = false;       // true while rotate mode is active
+let rotateAngles       = { x: 0, y: 0, z: 0 };  // accumulated rotation in degrees
+let _rotateOriginalPositions = null;  // Float32Array snapshot before any rotation
 const _raycaster       = new THREE.Raycaster();
 let _lastPaintHitPoint = null;        // THREE.Vector3 — last brush paint position for shift-line
 let _shiftLineMesh     = null;        // THREE.Line — preview line from last paint to cursor
@@ -54,16 +61,13 @@ let _lastEffectiveTexture = null;
 let _effectiveMapCache    = null;
 let _effectiveMapCacheKey = null;
 
-// ── Spatial grid state (must precede loadDefaultCube call) ────────────────────
-let _spatialGrid = null;
-let _spatialCellSize = 0;
-let _spatialMinX = 0, _spatialMinY = 0, _spatialMinZ = 0;
-
 const settings = {
   mappingMode:   5,     // Triplanar default
   scaleU:        0.5,
   scaleV:        0.5,
   amplitude:     0.5,
+  textureHeight: 0.5,
+  invertDisplacement: false,
   offsetU:       0.0,
   offsetV:       0.0,
   rotation:      0,
@@ -78,7 +82,15 @@ const settings = {
   capAngle:         20,
   boundaryFalloff:  0,
   symmetricDisplacement: false,
+  noDownwardZ: false,
   useDisplacement: false,
+  // Cylindrical-mode controls.
+  // null/undefined → derive from bounds (preserves legacy / non-cylindrical behavior).
+  snapSeamlessWrap: true,
+  cylinderCenterX:  null,
+  cylinderCenterY:  null,
+  cylinderRadius:   null,
+  cylinderPanelMinimized: false,
 };
 
 // ── Canvas filter support (Safari / iOS WebView don't support ctx.filter) ────
@@ -159,7 +171,7 @@ let precisionParentMap      = null;   // Int32Array: refined face → original f
 let precisionEdgeLength     = null;   // edge length used for current refinement
 let precisionBusy           = false;  // true while async subdivision is running
 let precisionCentroids      = null;   // Float32Array from buildAdjacency on refined mesh
-let precisionBoundRadii     = null;   // Float32Array — max vertex-to-centroid per refined tri
+let precisionFaceNormals    = null;   // Float32Array — local-space unit face normal per refined tri
 let precisionAdjacency      = null;   // Array from buildAdjacency on refined mesh
 let precisionExcludedFaces  = new Set(); // precision face indices excluded while precision is active
 
@@ -190,6 +202,9 @@ const stlFileInput   = document.getElementById('stl-file-input');
 const textureInput   = document.getElementById('texture-file-input');
 const presetGrid     = document.getElementById('preset-grid');
 const activeMapName  = document.getElementById('active-map-name');
+const customMapRow      = document.getElementById('custom-map-row');
+const customMapSwatch   = document.getElementById('custom-map-swatch');
+const customMapRemoveBtn = document.getElementById('custom-map-remove');
 const meshInfo       = document.getElementById('mesh-info');
 const exportBtn        = document.getElementById('export-btn');
 const export3mfBtn     = document.getElementById('export-3mf-btn');
@@ -198,9 +213,24 @@ const exportProgBar    = document.getElementById('export-progress-bar');
 const exportProgPct    = document.getElementById('export-progress-pct');
 const exportProgLbl    = document.getElementById('export-progress-label');
 const triLimitWarning  = document.getElementById('tri-limit-warning');
+const bakeBtn          = document.getElementById('bake-btn');
+const bakeMaskChk      = document.getElementById('bake-mask-chk');
+const bakeProgress     = document.getElementById('bake-progress');
+const bakeProgBar      = document.getElementById('bake-progress-bar');
+const bakeProgPct      = document.getElementById('bake-progress-pct');
+const bakeProgLbl      = document.getElementById('bake-progress-label');
+const advancedSection  = document.getElementById('advanced-section');
+const advancedToggle   = document.getElementById('advanced-toggle');
 const wireframeToggle  = document.getElementById('wireframe-toggle');
 const projectionToggle = document.getElementById('projection-toggle');
 const placeOnFaceBtn   = document.getElementById('place-on-face-btn');
+const rotateBtn        = document.getElementById('rotate-btn');
+const rotateControls   = document.getElementById('rotate-controls');
+const rotateXInput     = document.getElementById('rotate-x');
+const rotateYInput     = document.getElementById('rotate-y');
+const rotateZInput     = document.getElementById('rotate-z');
+const rotateApplyBtn   = document.getElementById('rotate-apply-btn');
+const rotateResetBtn   = document.getElementById('rotate-reset-btn');
 
 const mappingSelect   = document.getElementById('mapping-mode');
 const scaleUSlider    = document.getElementById('scale-u');
@@ -220,6 +250,7 @@ const rotationSlider = document.getElementById('rotation');
 const rotationVal    = document.getElementById('rotation-val');
 const amplitudeVal      = document.getElementById('amplitude-val');
 const amplitudeWarning  = document.getElementById('amplitude-warning');
+const invertDisplacementCheckbox = document.getElementById('invert-displacement');
 const refineLenVal = document.getElementById('refine-length-val');
 const resolutionWarning = document.getElementById('resolution-warning');
 const maxTriVal    = document.getElementById('max-triangles-val');
@@ -237,10 +268,19 @@ const textureSmoothingVal    = document.getElementById('texture-smoothing-val');
 const capAngleSlider         = document.getElementById('cap-angle');
 const capAngleVal            = document.getElementById('cap-angle-val');
 const capAngleRow            = document.getElementById('cap-angle-row');
+const cylinderSnapRow        = document.getElementById('cylinder-snap-row');
+const cylinderSnapToggle     = document.getElementById('cylinder-snap-toggle');
+const cylinderAxisRow        = document.getElementById('cylinder-axis-row');
+const cylinderAutofitBtn     = document.getElementById('cylinder-autofit-btn');
+const cylinderResetBtn       = document.getElementById('cylinder-reset-btn');
+const cylinderPanel          = document.getElementById('cylinder-panel');
+const cylinderCanvas         = document.getElementById('cylinder-canvas');
+const cylinderPanelMinimize  = document.getElementById('cylinder-panel-minimize');
 const boundaryFalloffSlider    = document.getElementById('boundary-falloff');
 const boundaryFalloffVal       = document.getElementById('boundary-falloff-val');
 const symmetricDispToggle    = document.getElementById('symmetric-displacement');
 const dispPreviewToggle      = document.getElementById('displacement-preview');
+const noDownwardZChk         = document.getElementById('no-downward-z-chk');
 
 // ── Exclusion panel DOM refs ──────────────────────────────────────────────────
 const exclBrushBtn        = document.getElementById('excl-brush-btn');
@@ -285,6 +325,17 @@ const imprintLink    = document.getElementById('imprint-link');
 const imprintOverlay = document.getElementById('imprint-overlay');
 const imprintClose   = document.getElementById('imprint-close');
 
+// ── Welcome / What's New popup ───────────────────────────────────────────────
+// Bump this date whenever the "What's New" bullets in index.html change to
+// re-show the popup to all returning visitors who previously dismissed it.
+const WELCOME_LAST_UPDATED = '2026-04-28';
+const WELCOME_STORAGE_KEY  = 'stlt-welcome-seen';
+const welcomeLink     = document.getElementById('welcome-link');
+const welcomeOverlay  = document.getElementById('welcome-overlay');
+const welcomeClose    = document.getElementById('welcome-close');
+const welcomeGotIt    = document.getElementById('welcome-got-it');
+const welcomeDontShow = document.getElementById('welcome-dont-show');
+
 // ── Language selector DOM refs ────────────────────────────────────────────────────
 const languageSelector = document.querySelector('.lang-seg');
 
@@ -296,13 +347,494 @@ const _LOG_MAX = Math.log(10);
 const scaleToPos = v => Math.round(Math.max(0, Math.min(1000, (Math.log(Math.max(0.01, Math.min(10, v))) - _LOG_MIN) / (_LOG_MAX - _LOG_MIN) * 1000)));
 const posToScale = p => parseFloat(Math.exp(_LOG_MIN + (p / 1000) * (_LOG_MAX - _LOG_MIN)).toFixed(2));
 
+// Compute the active U texture-aspect factor (mirrors updatePreview's logic so
+// the snap math agrees with what computeUV actually does).
+function _currentTextureAspectU() {
+  const tw = activeMapEntry?.width ?? 1, th = activeMapEntry?.height ?? 1;
+  const tmax = Math.max(tw, th, 1);
+  return tmax / Math.max(tw, 1);
+}
+
+// Round a U scale to the nearest seamless-wrap value:
+//   tiles around circumference = aspectU / scaleU  →  must be a positive integer.
+// Returns the snapped scale, clamped to [aspectU/MAX_TILES, aspectU].
+function _snapScaleUForSeamlessWrap(scaleU) {
+  const aU = _currentTextureAspectU();
+  const MAX_TILES = 20;
+  let n = Math.round(aU / Math.max(scaleU, 1e-6));
+  if (!Number.isFinite(n) || n < 1) n = 1;
+  if (n > MAX_TILES) n = MAX_TILES;
+  return parseFloat((aU / n).toFixed(4));
+}
+
 function _applyScaleU(v) {
   v = Math.max(0.01, Math.min(10, v));
+  if (settings.snapSeamlessWrap && settings.mappingMode === 3 /* MODE_CYLINDRICAL */) {
+    v = _snapScaleUForSeamlessWrap(v);
+  }
   settings.scaleU = v;
   scaleUSlider.value = scaleToPos(v);
   scaleUVal.value = v;
   if (settings.lockScale) { settings.scaleV = v; scaleVSlider.value = scaleToPos(v); scaleVVal.value = v; }
   clearTimeout(previewDebounce); previewDebounce = setTimeout(updatePreview, 80);
+}
+
+// ── Cylindrical projection: inset panel + axis helpers ────────────────────────
+// The inset 2D panel shows a top-down (X-Y) silhouette of the part with two
+// draggable handles: a center dot and a radius ring. Both drive
+// settings.cylinderCenterX/Y and settings.cylinderRadius respectively. When any
+// of those settings is null/undefined, the rendering and the projection both
+// fall back to AABB-derived defaults — which preserves the pre-feature behavior
+// for old projects and non-cylindrical modes.
+
+let _cylSilhouetteCanvas     = null; // off-screen canvas of the X-Y silhouette
+let _cylSilhouetteGeometry   = null; // identity check so we re-rasterize on swap
+let _cylSilhouetteAnchor     = null; // { cxw, cyw, scale } — world XY at silhouette pixel-center, frozen at build time
+let _cylPanelTransform       = null; // { scale, cxw, cyw, W, H } — current view; cxw/cyw are mutated by panning
+let _cylDragMode             = null; // null | 'center' | 'radius' | 'pan'
+let _cylHoverMode            = null; // null | 'center' | 'radius' (for cursor + redraw)
+let _cylPanLastPx            = 0;    // last pointer X during pan, in panel pixels
+let _cylPanLastPy            = 0;    // last pointer Y during pan, in panel pixels
+let _cylRedrawScheduled      = false;
+let _cylPreviewThrottle      = null;
+
+// Hit-detection radii in panel pixels — kept in one place so pointer handlers
+// and the redraw both treat the same area as the handle.
+const _CYL_CENTER_HIT_PX = 10;
+const _CYL_RING_HIT_PX   = 8;
+
+function getEffectiveCylinderCenter() {
+  const cx = settings.cylinderCenterX ?? (currentBounds?.center.x ?? 0);
+  const cy = settings.cylinderCenterY ?? (currentBounds?.center.y ?? 0);
+  return { cx, cy };
+}
+
+function getEffectiveCylinderRadius() {
+  if (settings.cylinderRadius != null) return settings.cylinderRadius;
+  if (!currentBounds) return 1;
+  return Math.max(currentBounds.size.x, currentBounds.size.y) * 0.5;
+}
+
+function _buildCylinderSilhouette() {
+  if (!currentGeometry || !currentBounds) {
+    _cylSilhouetteCanvas = null;
+    _cylSilhouetteGeometry = null;
+    _cylSilhouetteAnchor = null;
+    _cylPanelTransform = null;
+    return;
+  }
+  if (_cylSilhouetteGeometry === currentGeometry && _cylSilhouetteCanvas) return;
+
+  const W = cylinderCanvas.width, H = cylinderCanvas.height;
+  const padPx = 18;
+  const sx = currentBounds.size.x, sy = currentBounds.size.y;
+  // Fit the silhouette into the panel with 50% room around the AABB so a
+  // slightly off-center axis is still visible without panning. Panning lets
+  // the user reach further when needed.
+  const halfX = Math.max(sx, 1e-6) * 0.75;
+  const halfY = Math.max(sy, 1e-6) * 0.75;
+  const cxw = (currentBounds.min.x + currentBounds.max.x) * 0.5;
+  const cyw = (currentBounds.min.y + currentBounds.max.y) * 0.5;
+  const drawW = W - padPx * 2;
+  const drawH = H - padPx * 2;
+  const scale = Math.min(drawW / (halfX * 2), drawH / (halfY * 2));
+  // The silhouette anchor is frozen at build time; the *view* transform
+  // (_cylPanelTransform) starts equal to the anchor and is mutated by panning.
+  _cylSilhouetteAnchor = { cxw, cyw, scale };
+  _cylPanelTransform   = { scale, cxw, cyw, W, H };
+
+  // Rasterize each triangle's X-Y projection into an offscreen canvas so we
+  // can later drawImage it at a panning offset (putImageData ignores transforms).
+  const pos = currentGeometry.attributes.position.array;
+  const idx = currentGeometry.index ? currentGeometry.index.array : null;
+  const triCount = idx ? (idx.length / 3) : (pos.length / 9);
+  const buf = new Uint8Array(W * H);
+  const wx2px = (wx) => (wx - cxw) * scale + W / 2;
+  const wy2py = (wy) => H / 2 - (wy - cyw) * scale;
+
+  for (let t = 0; t < triCount; t++) {
+    const i0 = idx ? idx[t * 3]     : t * 3;
+    const i1 = idx ? idx[t * 3 + 1] : t * 3 + 1;
+    const i2 = idx ? idx[t * 3 + 2] : t * 3 + 2;
+    const x0 = wx2px(pos[i0 * 3]),     y0 = wy2py(pos[i0 * 3 + 1]);
+    const x1 = wx2px(pos[i1 * 3]),     y1 = wy2py(pos[i1 * 3 + 1]);
+    const x2 = wx2px(pos[i2 * 3]),     y2 = wy2py(pos[i2 * 3 + 1]);
+    const minX = Math.max(0,     Math.floor(Math.min(x0, x1, x2)));
+    const maxX = Math.min(W - 1, Math.ceil(Math.max(x0, x1, x2)));
+    const minY = Math.max(0,     Math.floor(Math.min(y0, y1, y2)));
+    const maxY = Math.min(H - 1, Math.ceil(Math.max(y0, y1, y2)));
+    if (minX > maxX || minY > maxY) continue;
+    for (let py = minY; py <= maxY; py++) {
+      for (let px = minX; px <= maxX; px++) {
+        const fx = px + 0.5, fy = py + 0.5;
+        const w0 = (fx - x1) * (y2 - y1) - (fy - y1) * (x2 - x1);
+        const w1 = (fx - x2) * (y0 - y2) - (fy - y2) * (x0 - x2);
+        const w2 = (fx - x0) * (y1 - y0) - (fy - y0) * (x1 - x0);
+        if ((w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0)) {
+          buf[py * W + px] = 1;
+        }
+      }
+    }
+  }
+
+  const off = document.createElement('canvas');
+  off.width = W; off.height = H;
+  const offCtx = off.getContext('2d');
+  const img = offCtx.createImageData(W, H);
+  const d = img.data;
+  for (let i = 0; i < W * H; i++) {
+    if (buf[i]) {
+      d[i * 4]     = 110;
+      d[i * 4 + 1] = 130;
+      d[i * 4 + 2] = 145;
+      d[i * 4 + 3] = 220;
+    } else {
+      d[i * 4 + 3] = 0;
+    }
+  }
+  offCtx.putImageData(img, 0, 0);
+  _cylSilhouetteCanvas = off;
+  _cylSilhouetteGeometry = currentGeometry;
+}
+
+function _redrawCylinderPanel() {
+  if (!cylinderCanvas) return;
+  if (cylinderPanel.classList.contains('hidden')) return;
+  const ctx = cylinderCanvas.getContext('2d');
+  const W = cylinderCanvas.width, H = cylinderCanvas.height;
+  // Background — a cooler dark to read against the surface tone.
+  ctx.fillStyle = '#0e1418';
+  ctx.fillRect(0, 0, W, H);
+
+  if (_cylPanelTransform && _cylSilhouetteCanvas && _cylSilhouetteAnchor) {
+    // Translate the silhouette by the difference between its build-time anchor
+    // and the current view center, so panning shifts it visually without a
+    // re-rasterization.
+    const a = _cylSilhouetteAnchor, t0 = _cylPanelTransform;
+    const dxPx =  (a.cxw - t0.cxw) * t0.scale;
+    const dyPx = -(a.cyw - t0.cyw) * t0.scale;
+    ctx.drawImage(_cylSilhouetteCanvas, dxPx, dyPx);
+  }
+  if (!_cylPanelTransform) {
+    // No model loaded yet — show a hint instead of an empty black square.
+    ctx.fillStyle = 'rgba(180, 200, 220, 0.55)';
+    ctx.font = '11px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(t('ui.cylinderNoModel1'), W / 2, H / 2 - 6);
+    ctx.fillText(t('ui.cylinderNoModel2'), W / 2, H / 2 + 8);
+    return;
+  }
+
+  const t = _cylPanelTransform;
+  const { cx, cy } = getEffectiveCylinderCenter();
+  const r = getEffectiveCylinderRadius();
+  const px = (cx - t.cxw) * t.scale + W / 2;
+  const py = H / 2 - (cy - t.cyw) * t.scale;
+  const pr = Math.max(2, r * t.scale);
+
+  const activeHandle = _cylDragMode || _cylHoverMode;
+  const ringActive   = activeHandle === 'radius';
+  const centerActive = activeHandle === 'center';
+
+  // Radius ring — thicker + brighter while hovered/dragged so it reads as a
+  // grabbable handle. A faint dashed inner halo on hover hints at "draggable".
+  ctx.lineWidth = ringActive ? 3.5 : 2;
+  ctx.strokeStyle = ringActive ? '#7be0e0' : '#22a3a3';
+  ctx.beginPath();
+  ctx.arc(px, py, pr, 0, Math.PI * 2);
+  ctx.stroke();
+
+  if (ringActive) {
+    ctx.save();
+    ctx.setLineDash([4, 4]);
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(123, 224, 224, 0.6)';
+    ctx.beginPath(); ctx.arc(px, py, pr - 5, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(px, py, pr + 5, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  }
+
+  // Center dot — grows a bit on hover/drag to mirror the ring's affordance.
+  const dotR = centerActive ? 8 : 6;
+  ctx.fillStyle = centerActive ? '#7be0e0' : '#22a3a3';
+  ctx.beginPath();
+  ctx.arc(px, py, dotR, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // Axis crosshair to make the placement obvious.
+  ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(px - 12, py); ctx.lineTo(px - 8,  py);
+  ctx.moveTo(px + 8,  py); ctx.lineTo(px + 12, py);
+  ctx.moveTo(px, py - 12); ctx.lineTo(px, py - 8);
+  ctx.moveTo(px, py + 8);  ctx.lineTo(px, py + 12);
+  ctx.stroke();
+}
+
+// Returns 'center' | 'radius' | null for a panel-pixel coordinate.
+function _cylHandleAt(px, py) {
+  if (!_cylPanelTransform) return null;
+  const t = _cylPanelTransform;
+  const { cx, cy } = getEffectiveCylinderCenter();
+  const r = getEffectiveCylinderRadius();
+  const cpx = (cx - t.cxw) * t.scale + cylinderCanvas.width / 2;
+  const cpy = cylinderCanvas.height / 2 - (cy - t.cyw) * t.scale;
+  const dx = px - cpx, dy = py - cpy;
+  const distFromCenter = Math.sqrt(dx * dx + dy * dy);
+  const ringPx = r * t.scale;
+  if (distFromCenter <= _CYL_CENTER_HIT_PX) return 'center';
+  if (Math.abs(distFromCenter - ringPx) <= _CYL_RING_HIT_PX) return 'radius';
+  return null;
+}
+
+function _scheduleCylinderPanelRedraw() {
+  if (_cylRedrawScheduled) return;
+  _cylRedrawScheduled = true;
+  requestAnimationFrame(() => {
+    _cylRedrawScheduled = false;
+    _redrawCylinderPanel();
+  });
+}
+
+function _cylinderPanelToWorld(e) {
+  if (!_cylPanelTransform) return null;
+  const rect = cylinderCanvas.getBoundingClientRect();
+  const px = ((e.clientX - rect.left) / rect.width)  * cylinderCanvas.width;
+  const py = ((e.clientY - rect.top)  / rect.height) * cylinderCanvas.height;
+  const t = _cylPanelTransform;
+  const wx = (px - cylinderCanvas.width  / 2) / t.scale + t.cxw;
+  const wy = (cylinderCanvas.height / 2 - py) / t.scale + t.cyw;
+  return { px, py, wx, wy };
+}
+
+function _cylinderUpdateCursor() {
+  if (!cylinderCanvas) return;
+  const mode = _cylDragMode || _cylHoverMode;
+  if (mode === 'center')      cylinderCanvas.style.cursor = 'move';
+  else if (mode === 'radius') cylinderCanvas.style.cursor = 'ew-resize';
+  else if (_cylDragMode === 'pan') cylinderCanvas.style.cursor = 'grabbing';
+  else                        cylinderCanvas.style.cursor = 'grab';
+}
+
+function _cylinderPointerDown(e) {
+  if (!currentBounds) return;
+  const m = _cylinderPanelToWorld(e);
+  if (!m) return;
+  // Right-click and middle-click always pan (matching 3D-app conventions),
+  // even if they happen on a handle. Left-click prefers handle pick — center
+  // has higher priority than the ring when the ring is small enough that
+  // they overlap; the user can always grow the ring to pick it specifically.
+  const isPanButton = e.button === 1 || e.button === 2;
+  const handle = isPanButton ? null : _cylHandleAt(m.px, m.py);
+  if (handle) {
+    _cylDragMode = handle;
+  } else {
+    // Empty area (or pan-button) — pan the view so the user can place the
+    // cylinder axis outside the silhouette's default window (e.g. for a small
+    // fragment of a much larger cylinder).
+    _cylDragMode = 'pan';
+    _cylPanLastPx = m.px;
+    _cylPanLastPy = m.py;
+  }
+  _cylinderUpdateCursor();
+  _scheduleCylinderPanelRedraw();
+  try { cylinderCanvas.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+  e.preventDefault();
+}
+
+function _cylinderPointerMove(e) {
+  const m = _cylinderPanelToWorld(e);
+  if (!m) return;
+
+  if (_cylDragMode) {
+    if (_cylDragMode === 'center') {
+      settings.cylinderCenterX = m.wx;
+      settings.cylinderCenterY = m.wy;
+      _scheduleCylinderPanelRedraw();
+      _scheduleCylinderPreviewUpdate();
+    } else if (_cylDragMode === 'radius') {
+      const { cx, cy } = getEffectiveCylinderCenter();
+      const dx = m.wx - cx, dy = m.wy - cy;
+      settings.cylinderRadius = Math.max(0.1, Math.sqrt(dx * dx + dy * dy));
+      _scheduleCylinderPanelRedraw();
+      _scheduleCylinderPreviewUpdate();
+    } else if (_cylDragMode === 'pan' && _cylPanelTransform) {
+      // Pan in panel pixels → translate the view's world center by the inverse
+      // of the pixel delta (drag right = view moves right = cxw decreases).
+      const dPx = m.px - _cylPanLastPx;
+      const dPy = m.py - _cylPanLastPy;
+      _cylPanelTransform.cxw -= dPx / _cylPanelTransform.scale;
+      _cylPanelTransform.cyw += dPy / _cylPanelTransform.scale; // y is flipped
+      _cylPanLastPx = m.px;
+      _cylPanLastPy = m.py;
+      _scheduleCylinderPanelRedraw();
+      // Pan doesn't change projection state — no preview update needed.
+    }
+    return;
+  }
+
+  // Not dragging — update hover state for cursor + visual affordance.
+  const handle = _cylHandleAt(m.px, m.py);
+  if (handle !== _cylHoverMode) {
+    _cylHoverMode = handle;
+    _cylinderUpdateCursor();
+    _scheduleCylinderPanelRedraw();
+  }
+}
+
+function _scheduleCylinderPreviewUpdate() {
+  if (_cylPreviewThrottle) return;
+  _cylPreviewThrottle = setTimeout(() => {
+    _cylPreviewThrottle = null;
+    updatePreview();
+    // updatePreview() mutates uniforms in place; the 3D viewport's render
+    // loop only re-draws when _needsRender flips, so push it explicitly.
+    requestRender();
+  }, 30);
+}
+
+// Mouse wheel inside the cylinder ring adjusts the radius. Multiplicative
+// scaling gives a smooth log feel — each wheel notch (~100 deltaY) changes
+// the radius by ~5%.
+function _cylinderWheel(e) {
+  if (!currentBounds || !_cylPanelTransform) return;
+  const m = _cylinderPanelToWorld(e);
+  if (!m) return;
+  // Only intercept wheel events that are actually on the cylinder gizmo, so
+  // wheel scrolling outside the ring still bubbles to whatever the user
+  // expects (page scroll, etc.).
+  const t = _cylPanelTransform;
+  const { cx, cy } = getEffectiveCylinderCenter();
+  const cpx = (cx - t.cxw) * t.scale + cylinderCanvas.width / 2;
+  const cpy = cylinderCanvas.height / 2 - (cy - t.cyw) * t.scale;
+  const dx = m.px - cpx, dy = m.py - cpy;
+  const distFromCenter = Math.sqrt(dx * dx + dy * dy);
+  const ringPx = getEffectiveCylinderRadius() * t.scale;
+  // Active wheel zone = inside the ring + a small ring-grace band.
+  if (distFromCenter > ringPx + _CYL_RING_HIT_PX) return;
+  e.preventDefault();
+  const factor = Math.pow(0.95, e.deltaY / 100);
+  settings.cylinderRadius = Math.max(0.1, getEffectiveCylinderRadius() * factor);
+  _scheduleCylinderPanelRedraw();
+  _scheduleCylinderPreviewUpdate();
+  // Wheel is a discrete gesture — persist the new value without waiting for
+  // a drag-end equivalent.
+  if (typeof _autoSaveSettings === 'function') _autoSaveSettings();
+}
+
+function _cylinderPointerLeave() {
+  if (_cylHoverMode) {
+    _cylHoverMode = null;
+    _cylinderUpdateCursor();
+    _scheduleCylinderPanelRedraw();
+  }
+}
+
+function _cylinderPointerUp(e) {
+  if (!_cylDragMode) return;
+  const wasPan = _cylDragMode === 'pan';
+  _cylDragMode = null;
+  try { cylinderCanvas.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
+  _cylinderUpdateCursor();
+  _scheduleCylinderPanelRedraw();
+  if (wasPan) return; // pan doesn't change projection state
+  if (_cylPreviewThrottle) { clearTimeout(_cylPreviewThrottle); _cylPreviewThrottle = null; }
+  updatePreview();
+  requestRender();
+  // Persist the new center/radius — cylinderCanvas is outside #settings-panel,
+  // so the panel's input/change listener won't autosave for us.
+  if (typeof _autoSaveSettings === 'function') _autoSaveSettings();
+}
+
+cylinderCanvas.addEventListener('pointerdown',   _cylinderPointerDown);
+cylinderCanvas.addEventListener('pointermove',   _cylinderPointerMove);
+cylinderCanvas.addEventListener('pointerup',     _cylinderPointerUp);
+cylinderCanvas.addEventListener('pointercancel', _cylinderPointerUp);
+cylinderCanvas.addEventListener('pointerleave',  _cylinderPointerLeave);
+cylinderCanvas.addEventListener('wheel', _cylinderWheel, { passive: false });
+// Right-click is reserved for panning, so swallow the browser context menu
+// before it interrupts the drag.
+cylinderCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+function updateCylinderUIVisibility() {
+  const isCyl = settings.mappingMode === 3 /* MODE_CYLINDRICAL */;
+  cylinderSnapRow.style.display = isCyl ? '' : 'none';
+  cylinderAxisRow.style.display = isCyl ? '' : 'none';
+  // Show the panel whenever the user is in cylindrical mode, even without a
+  // model loaded — they get the empty placeholder until they load one, which
+  // makes it clear that the gizmo will appear there.
+  cylinderPanel.classList.toggle('hidden', !isCyl);
+  if (isCyl) {
+    if (currentGeometry) _buildCylinderSilhouette();
+    _scheduleCylinderPanelRedraw();
+  }
+}
+
+// Least-squares circle fit (Kasa method). Fits to vertices of triangles whose
+// face normal is roughly perpendicular to the cylinder axis (|n.z| < 0.5), so
+// inner bores are excluded and end-caps don't pull the fit. Returns true and
+// updates settings.cylinderCenterX/Y/cylinderRadius on success.
+function autoFitCylinderAxis() {
+  if (!currentGeometry || !currentBounds) return false;
+  const pos = currentGeometry.attributes.position.array;
+  const idx = currentGeometry.index ? currentGeometry.index.array : null;
+  const fn  = triangleFaceNormals;
+  const triCount = idx ? (idx.length / 3) : (pos.length / 9);
+
+  let n = 0;
+  let Sx = 0, Sy = 0, Sxx = 0, Syy = 0, Sxy = 0;
+  let Sxz = 0, Syz = 0, Sz = 0;
+  for (let t = 0; t < triCount; t++) {
+    const nz = fn ? fn[t * 3 + 2] : 0;
+    if (Math.abs(nz) >= 0.5) continue; // skip cap-like triangles
+    for (let v = 0; v < 3; v++) {
+      const i = idx ? idx[t * 3 + v] : (t * 3 + v);
+      const x = pos[i * 3];
+      const y = pos[i * 3 + 1];
+      const z = x * x + y * y;
+      Sx += x; Sy += y; Sxx += x * x; Syy += y * y; Sxy += x * y;
+      Sxz += x * z; Syz += y * z; Sz += z;
+      n++;
+    }
+  }
+  if (n < 10) return false;
+
+  // Solve the 3x3 normal equations for [A, B, C] where (cx, cy) = (A/2, B/2)
+  // and r = sqrt(C + cx^2 + cy^2).
+  const M = [
+    [Sxx, Sxy, Sx],
+    [Sxy, Syy, Sy],
+    [Sx,  Sy,  n ],
+  ];
+  const b = [Sxz, Syz, Sz];
+  const det = (m) =>
+      m[0][0]*(m[1][1]*m[2][2] - m[1][2]*m[2][1])
+    - m[0][1]*(m[1][0]*m[2][2] - m[1][2]*m[2][0])
+    + m[0][2]*(m[1][0]*m[2][1] - m[1][1]*m[2][0]);
+  const D = det(M);
+  if (Math.abs(D) < 1e-12) return false;
+  const colReplace = (col) => M.map((row, i) => row.map((v, j) => j === col ? b[i] : v));
+  const A = det(colReplace(0)) / D;
+  const B = det(colReplace(1)) / D;
+  const C = det(colReplace(2)) / D;
+  const cx = A / 2, cy = B / 2;
+  const r2 = C + cx * cx + cy * cy;
+  if (!Number.isFinite(r2) || r2 <= 0) return false;
+  const r = Math.sqrt(r2);
+  // Reject obviously bogus fits (e.g. degenerate symmetric input where the
+  // fit collapses to a huge or tiny radius).
+  const maxReasonable = Math.max(currentBounds.size.x, currentBounds.size.y) * 5;
+  if (r > maxReasonable || r < 1e-3) return false;
+
+  settings.cylinderCenterX = cx;
+  settings.cylinderCenterY = cy;
+  settings.cylinderRadius  = r;
+  return true;
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -359,6 +891,9 @@ function populateLanguageSelector() {
       if (lastFastDiag) renderFastDiag(lastFastDiag);
       if (lastAdvancedDiag) renderAdvancedDiag(lastAdvancedDiag);
     }
+    // The cylinder panel paints its placeholder text via Canvas2D, which
+    // applyTranslations() doesn't reach — re-render so the new locale lands.
+    _scheduleCylinderPanelRedraw();
   });
 
   languageSelector.appendChild(select);
@@ -397,6 +932,7 @@ document.getElementById('theme-toggle').addEventListener('click', () => {
 });
 
 wireEvents();
+showWelcomeIfNeeded();
 // Sync scale number inputs with the slider's initial position
 scaleUVal.value = posToScale(parseFloat(scaleUSlider.value));
 scaleVVal.value = posToScale(parseFloat(scaleVSlider.value));
@@ -433,7 +969,10 @@ const _presetSwatches = IMAGE_PRESETS.map((p, idx) => {
   return swatch;
 });
 
-// Load lightweight thumbnails (~49 KB total), then auto-select Crystal
+// Load lightweight thumbnails (~49 KB total), then auto-select a preset.
+// If localStorage has a persisted preset name, pick that one with defaults
+// suppressed (so the user's saved textureSmoothing / scaleU are preserved);
+// otherwise fall back to the built-in default and apply its defaults.
 loadAllThumbnails().then(thumbs => {
   thumbs.forEach((thumb, idx) => {
     if (!thumb) return;
@@ -444,10 +983,25 @@ loadAllThumbnails().then(thumbs => {
     const placeholder = swatch.querySelector('canvas');
     swatch.replaceChild(thumb.thumbCanvas, placeholder);
   });
-  // Auto-select the default preset
-  const crystalIdx = IMAGE_PRESETS.findIndex(p => p.name === DEFAULT_PRESET_NAME);
-  if (crystalIdx >= 0 && PRESETS[crystalIdx]) {
-    selectPreset(crystalIdx, _presetSwatches[crystalIdx]);
+
+  let persistedName = null;
+  try {
+    const raw = sessionStorage.getItem('bumpmesh-settings');
+    if (raw) persistedName = (JSON.parse(raw) || {}).activeMapName || null;
+  } catch { /* ignore */ }
+
+  let targetIdx = -1;
+  // If the user had ANY map active last session (preset or a since-discarded
+  // custom upload), suppress preset defaults so the restored settings survive
+  // — we'd otherwise clobber textureSmoothing / scaleU when falling back.
+  let applyDefaults = !persistedName;
+  if (persistedName) {
+    targetIdx = IMAGE_PRESETS.findIndex(p => p.name === persistedName);
+    if (!(targetIdx >= 0 && PRESETS[targetIdx])) targetIdx = -1;
+  }
+  if (targetIdx < 0) targetIdx = IMAGE_PRESETS.findIndex(p => p.name === DEFAULT_PRESET_NAME);
+  if (targetIdx >= 0 && PRESETS[targetIdx]) {
+    selectPreset(targetIdx, _presetSwatches[targetIdx], applyDefaults);
   }
 }).catch(err => console.error('Failed to load thumbnails:', err));
 
@@ -461,7 +1015,7 @@ function resetTextureSmoothing() {
 
 let _selectGeneration = 0;   // debounce rapid preset clicks
 
-async function selectPreset(idx, swatchEl) {
+async function selectPreset(idx, swatchEl, applyDefaults = true) {
   const gen = ++_selectGeneration;
   document.querySelectorAll('.preset-swatch').forEach(s => s.classList.remove('active'));
   swatchEl.classList.add('active');
@@ -469,8 +1023,10 @@ async function selectPreset(idx, swatchEl) {
   const entry = PRESETS[idx];
   if (!entry) return;
   activeMapName.textContent = entry.name;
-  resetTextureSmoothing();
-  if (entry.defaultScale != null) _applyScaleU(entry.defaultScale);
+  if (applyDefaults) {
+    resetTextureSmoothing();
+    if (entry.defaultScale != null) _applyScaleU(entry.defaultScale);
+  }
 
   // If full texture is already loaded, use it directly
   if (entry.texture) {
@@ -491,6 +1047,100 @@ async function selectPreset(idx, swatchEl) {
   } catch (err) {
     console.error('Failed to load full texture:', err);
     swatchEl.classList.remove('preset-loading-full');
+  }
+}
+
+// ── Custom-map thumbnail (below the upload button) ───────────────────────────
+
+/** Paint a small preview canvas of the custom map and reveal the thumbnail row. */
+function _showCustomMapThumb(entry) {
+  if (!entry || !entry.fullCanvas || !customMapSwatch) return;
+  customMapSwatch.innerHTML = '';
+  const THUMB_SIZE = 80;
+  const thumb = document.createElement('canvas');
+  thumb.width = THUMB_SIZE; thumb.height = THUMB_SIZE;
+  const ctx = thumb.getContext('2d');
+  // Aspect-fit the source canvas inside the square thumbnail.
+  const sw = entry.fullCanvas.width, sh = entry.fullCanvas.height;
+  const scale = Math.min(THUMB_SIZE / sw, THUMB_SIZE / sh);
+  const dw = sw * scale, dh = sh * scale;
+  ctx.drawImage(entry.fullCanvas, (THUMB_SIZE - dw) / 2, (THUMB_SIZE - dh) / 2, dw, dh);
+  customMapSwatch.appendChild(thumb);
+
+  const label = document.createElement('span');
+  label.className = 'preset-label';
+  label.textContent = entry.name;
+  customMapSwatch.appendChild(label);
+
+  customMapSwatch.title = entry.name;
+  customMapRow.classList.remove('hidden');
+}
+
+function _hideCustomMapThumb() {
+  if (!customMapRow) return;
+  customMapRow.classList.add('hidden');
+  if (customMapSwatch) customMapSwatch.innerHTML = '';
+}
+
+/** Promote the kept-aside custom map back to the active map. No defaults reset. */
+function _activateCustomMap() {
+  if (!_lastCustomMap) return;
+  activeMapEntry = _lastCustomMap;
+  document.querySelectorAll('.preset-swatch').forEach(s => s.classList.remove('active'));
+  customMapSwatch.classList.add('active');
+  activeMapName.textContent = _lastCustomMap.name;
+  updatePreview();
+}
+
+if (customMapSwatch) {
+  customMapSwatch.addEventListener('click', _activateCustomMap);
+  customMapSwatch.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); _activateCustomMap(); }
+  });
+}
+
+if (customMapRemoveBtn) {
+  customMapRemoveBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const wasActive = activeMapEntry === _lastCustomMap;
+    _lastCustomMap = null;
+    _hideCustomMapThumb();
+    if (wasActive) {
+      // Fall back to the default preset so the viewer keeps a usable texture.
+      const idx = IMAGE_PRESETS.findIndex(p => p.name === DEFAULT_PRESET_NAME);
+      if (idx >= 0 && _presetSwatches[idx] && PRESETS[idx]) {
+        selectPreset(idx, _presetSwatches[idx], /*applyDefaults=*/false);
+      } else {
+        activeMapEntry = null;
+        activeMapName.textContent = t('ui.noMapSelected');
+        updatePreview();
+      }
+    }
+  });
+}
+
+// ── Welcome popup: open / dismiss ─────────────────────────────────────────────
+function openWelcome({ allowDismissPersist }) {
+  welcomeDontShow.checked = false;
+  welcomeOverlay.classList.remove('hidden');
+  trapFocus(welcomeOverlay);
+
+  const close = () => {
+    if (allowDismissPersist && welcomeDontShow.checked) {
+      try { localStorage.setItem(WELCOME_STORAGE_KEY, WELCOME_LAST_UPDATED); } catch { /* quota / private mode */ }
+    }
+    welcomeOverlay.classList.add('hidden');
+  };
+  welcomeClose.onclick   = close;
+  welcomeGotIt.onclick   = close;
+  welcomeOverlay.onclick = (e) => { if (e.target === welcomeOverlay) close(); };
+}
+
+function showWelcomeIfNeeded() {
+  let seen = null;
+  try { seen = localStorage.getItem(WELCOME_STORAGE_KEY); } catch { /* private mode */ }
+  if (seen !== WELCOME_LAST_UPDATED) {
+    openWelcome({ allowDismissPersist: true });
   }
 }
 
@@ -525,7 +1175,10 @@ function trapFocus(overlay) {
 function wireEvents() {
   // ── Model loading ──
   stlFileInput.addEventListener('change', (e) => {
-    if (e.target.files[0]) handleModelFile(e.target.files[0]);
+    const file = e.target.files[0];
+    if (!file) return;
+    e.target.value = '';
+    handleModelFile(file);
   });
 
   // Drag & drop on the viewport section
@@ -537,7 +1190,10 @@ function wireEvents() {
   dropZone.addEventListener('drop', (e) => {
     e.preventDefault();
     dropZone.classList.remove('drag-over');
-    const file = [...e.dataTransfer.files].find(f => /\.(stl|obj|3mf)$/i.test(f.name));
+    const files = [...e.dataTransfer.files];
+    const bmFile = files.find(f => /\.bumpmesh$/i.test(f.name));
+    if (bmFile) { importProject(bmFile).catch(err => alert(t('alerts.importFailed', { msg: err.message }))); return; }
+    const file = files.find(f => /\.(stl|obj|3mf)$/i.test(f.name));
     if (file) handleModelFile(file);
   });
 
@@ -582,20 +1238,65 @@ function wireEvents() {
     try {
       activeMapEntry = await loadCustomTexture(file);
       activeMapEntry.isCustom = true;
+      _lastCustomMap = activeMapEntry;
       activeMapName.textContent = file.name;
       document.querySelectorAll('.preset-swatch').forEach(s => s.classList.remove('active'));
+      _showCustomMapThumb(activeMapEntry);
+      customMapSwatch.classList.add('active');
       resetTextureSmoothing();
       updatePreview();
     } catch (err) {
       console.error('Failed to load texture:', err);
     }
+    // Reset the file input so re-uploading the same filename still triggers 'change'.
+    textureInput.value = '';
   });
 
   // ── Settings ──
   mappingSelect.addEventListener('change', () => {
     settings.mappingMode = parseInt(mappingSelect.value, 10);
     capAngleRow.style.display = settings.mappingMode === 3 ? '' : 'none';
+    updateCylinderUIVisibility();
     updatePreview();
+  });
+
+  cylinderSnapToggle.addEventListener('change', () => {
+    settings.snapSeamlessWrap = cylinderSnapToggle.checked;
+    if (settings.snapSeamlessWrap && settings.mappingMode === 3) {
+      // Snap immediately so the user sees the seam fix without dragging first.
+      _applyScaleU(settings.scaleU);
+    }
+  });
+
+  cylinderAutofitBtn.addEventListener('click', () => {
+    if (autoFitCylinderAxis()) {
+      _scheduleCylinderPanelRedraw();
+      updatePreview();
+      requestRender();
+      _autoSaveSettings();
+    }
+  });
+
+  cylinderPanelMinimize.addEventListener('click', () => {
+    settings.cylinderPanelMinimized = !settings.cylinderPanelMinimized;
+    cylinderPanel.classList.toggle('minimized', settings.cylinderPanelMinimized);
+    if (!settings.cylinderPanelMinimized) _scheduleCylinderPanelRedraw();
+    _autoSaveSettings();
+  });
+
+  cylinderResetBtn.addEventListener('click', () => {
+    settings.cylinderCenterX = null;
+    settings.cylinderCenterY = null;
+    settings.cylinderRadius  = null;
+    // Also undo any panning so the silhouette returns to its default framing.
+    if (_cylSilhouetteAnchor && _cylPanelTransform) {
+      _cylPanelTransform.cxw = _cylSilhouetteAnchor.cxw;
+      _cylPanelTransform.cyw = _cylSilhouetteAnchor.cyw;
+    }
+    _scheduleCylinderPanelRedraw();
+    updatePreview();
+    requestRender();
+    _autoSaveSettings();
   });
 
   // Scale U — when lock is on, mirror to V
@@ -635,8 +1336,18 @@ function wireEvents() {
   linkSlider(offsetUSlider,   offsetUVal,   v => { settings.offsetU   = v; return v.toFixed(2); });
   linkSlider(offsetVSlider,   offsetVVal,   v => { settings.offsetV   = v; return v.toFixed(2); });
   linkSlider(rotationSlider,  rotationVal,  v => { settings.rotation  = v; return Math.round(v); });
-  linkSlider(amplitudeSlider, amplitudeVal, v => { settings.amplitude = v; checkAmplitudeWarning(); return v.toFixed(2); });
+  linkSlider(amplitudeSlider, amplitudeVal, v => {
+    settings.textureHeight = v;
+    settings.amplitude = (settings.invertDisplacement ? -1 : 1) * v;
+    checkAmplitudeWarning();
+    return v.toFixed(2);
+  });
   amplitudeVal.addEventListener('change', checkAmplitudeWarning);
+  invertDisplacementCheckbox.addEventListener('change', () => {
+    settings.invertDisplacement = invertDisplacementCheckbox.checked;
+    settings.amplitude = (settings.invertDisplacement ? -1 : 1) * settings.textureHeight;
+    updatePreview();
+  });
   linkSlider(boundaryFalloffSlider, boundaryFalloffVal, v => { settings.boundaryFalloff = v; _falloffDirty = true; return v.toFixed(1); });
   linkSlider(refineLenSlider, refineLenVal, v => { settings.refineLength  = v; checkResolutionWarning(); return v.toFixed(2); }, false);
   refineLenVal.addEventListener('change', checkResolutionWarning);
@@ -651,6 +1362,10 @@ function wireEvents() {
     settings.symmetricDisplacement = symmetricDispToggle.checked;
     updatePreview();
   });
+  noDownwardZChk.addEventListener('change', () => {
+    settings.noDownwardZ = noDownwardZChk.checked;
+    updatePreview();
+  });
 
   dispPreviewToggle.addEventListener('change', () => {
     toggleDisplacementPreview(dispPreviewToggle.checked);
@@ -659,6 +1374,41 @@ function wireEvents() {
   // ── Place on Face ──
   placeOnFaceBtn.addEventListener('click', () => {
     togglePlaceOnFace(!placeOnFaceActive);
+  });
+
+  // ── Rotate ──
+  rotateBtn.addEventListener('click', () => {
+    toggleRotateMode(!rotateActive);
+  });
+  rotateApplyBtn.addEventListener('click', () => {
+    applyRotationFromInputs();
+    toggleRotateMode(false);
+  });
+  rotateResetBtn.addEventListener('click', () => {
+    if (!currentGeometry || !_rotateOriginalPositions) return;
+
+    // Restore original vertex positions
+    currentGeometry.attributes.position.array.set(_rotateOriginalPositions);
+    currentGeometry.attributes.position.needsUpdate = true;
+    currentGeometry.computeVertexNormals();
+    if (currentGeometry.attributes.faceNormal) {
+      currentGeometry.deleteAttribute('faceNormal');
+    }
+
+    rotateAngles = { x: 0, y: 0, z: 0 };
+    rotateXInput.value = '0';
+    rotateYInput.value = '0';
+    rotateZInput.value = '0';
+
+    // Light update only — still in rotate mode
+    setMeshGeometry(currentGeometry);
+    requestRender();
+  });
+  // Allow Enter key in inputs to apply
+  [rotateXInput, rotateYInput, rotateZInput].forEach(inp => {
+    inp.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') applyRotationFromInputs();
+    });
   });
 
   // ── License ──
@@ -674,6 +1424,9 @@ function wireEvents() {
   imprintOverlay.addEventListener('click', (e) => {
     if (e.target === imprintOverlay) imprintOverlay.classList.add('hidden');
   });
+
+  // ── Welcome / What's New ──
+  welcomeLink.addEventListener('click', () => openWelcome({ allowDismissPersist: false }));
 
   // ── Mesh diagnostics dismiss ──
   meshDiagDismiss.addEventListener('click', () => {
@@ -712,6 +1465,12 @@ function wireEvents() {
   };
   exportBtn.addEventListener('click', () => startExport('stl'));
   export3mfBtn.addEventListener('click', () => startExport('3mf'));
+
+  // ── Advanced / Beta Features panel: collapse toggle + bake action ──
+  advancedToggle.addEventListener('click', () => {
+    advancedSection.classList.toggle('collapsed');
+  });
+  bakeBtn.addEventListener('click', bakeTextures);
 
   // ── Wireframe ──
   wireframeToggle.addEventListener('change', () => setWireframe(wireframeToggle.checked));
@@ -823,6 +1582,9 @@ function wireEvents() {
   canvas.addEventListener('mousedown', (e) => {
     if (!currentGeometry || e.button !== 0) return;
 
+    // Rotation gizmo takes priority
+    if (isGizmoDragging()) return;
+
     // Place on Face mode
     if (placeOnFaceActive) {
       e.preventDefault();
@@ -921,10 +1683,16 @@ function wireEvents() {
     if (!isPainting) return;
     isPainting = false;
     getControls().enabled = true;
+    // Capture the completed stroke synchronously so quick consecutive strokes
+    // each get their own undo entry — the debounced window-pointerup capture
+    // would otherwise collapse strokes that finish within UNDO_DEBOUNCE_MS.
+    _flushUndoCapture();
+    _commitUndoCapture();
   });
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
+      if (rotateActive) toggleRotateMode(false);
       if (placeOnFaceActive) togglePlaceOnFace(false);
       if (exclusionTool) setExclusionTool(null);
       licenseOverlay.classList.add('hidden');
@@ -962,8 +1730,9 @@ function setExclusionTool(tool) {
   // Clicking the active tool toggles it off; passing null always deactivates
   exclusionTool = (exclusionTool === tool) ? null : tool;
 
-  // Deactivate place-on-face if an exclusion tool is being activated
+  // Deactivate place-on-face and rotate if an exclusion tool is being activated
   if (exclusionTool && placeOnFaceActive) togglePlaceOnFace(false);
+  if (exclusionTool && rotateActive) toggleRotateMode(false);
 
   // Exit 3D displacement preview when a masking tool is activated
   if (exclusionTool && settings.useDisplacement) {
@@ -1101,83 +1870,86 @@ function distSqPointToTri(px, py, pz, ax, ay, az, bx, by, bz, cx, cy, cz) {
   return qx*qx + qy*qy + qz*qz;
 }
 
-// ── Spatial grid for fast sphere queries ──────────────────────────────────
+/**
+ * BFS-along-adjacency circle brush (after PrusaSlicer's TriangleSelector).
+ *
+ * Starts at `seedTriIdx`, walks the mesh's neighbor graph, and invokes
+ * cb(triIdx) for every triangle that:
+ *   1. has at least one part inside the brush "cylinder" (the projection of
+ *      a 3D distance-to-triangle test onto the plane perpendicular to
+ *      `viewDir`), AND
+ *   2. is reachable without crossing any back-facing triangle.
+ *
+ * Back-face culling at the BFS expansion step is what makes this both fast
+ * and correct: the walk can't tunnel through a thin shell to its hidden
+ * other side because the connecting wall faces away from the camera. Work
+ * is bounded by the painted area, not the mesh size — no spatial index
+ * required.
+ */
+function bfsBrushSelect(seedTriIdx, hitPt, r2, viewDir, cb) {
+  const usePrecision = precisionMaskingEnabled && precisionGeometry;
+  const adjacency  = usePrecision ? precisionAdjacency  : triangleAdjacency;
+  const faceNormals = usePrecision ? precisionFaceNormals : triangleFaceNormals;
+  const geo        = usePrecision ? precisionGeometry   : currentGeometry;
+  if (!adjacency || !faceNormals || !geo || seedTriIdx < 0 || seedTriIdx >= adjacency.length) return;
+  const pos = geo.attributes.position;
 
-function buildSpatialGrid(centroids, triCount, bounds) {
-  const vol = bounds.size.x * bounds.size.y * bounds.size.z;
-  const cellSize = Math.max(Math.cbrt(vol / Math.max(triCount, 1)) * 2, 1e-6);
-  _spatialCellSize = cellSize;
-  _spatialMinX = bounds.min.x;
-  _spatialMinY = bounds.min.y;
-  _spatialMinZ = bounds.min.z;
-  const grid = new Map();
-  for (let t = 0; t < triCount; t++) {
-    const gx = Math.floor((centroids[t*3]   - _spatialMinX) / cellSize);
-    const gy = Math.floor((centroids[t*3+1] - _spatialMinY) / cellSize);
-    const gz = Math.floor((centroids[t*3+2] - _spatialMinZ) / cellSize);
-    const key = (gx * 73856093) ^ (gy * 19349663) ^ (gz * 83492791);
-    let list = grid.get(key);
-    if (!list) { list = []; grid.set(key, list); }
-    list.push(t);
+  const vdx = viewDir.x, vdy = viewDir.y, vdz = viewDir.z;
+  const hx  = hitPt.x,   hy  = hitPt.y,   hz  = hitPt.z;
+
+  const visited = new Uint8Array(adjacency.length);
+  visited[seedTriIdx] = 1;
+  const queue = [seedTriIdx];
+  let head = 0;
+
+  while (head < queue.length) {
+    const cur = queue[head++];
+    const i3 = cur * 3;
+
+    // Inside-test: project each vertex onto the plane through hitPt
+    // perpendicular to viewDir, then take 3D point-to-triangle distance to
+    // the projected triangle (equivalent to 2D screen-space disk in world
+    // units). Any triangle with at least partial overlap → cb + expand.
+    const ax = pos.getX(i3),     ay = pos.getY(i3),     az = pos.getZ(i3);
+    const bx = pos.getX(i3 + 1), by = pos.getY(i3 + 1), bz = pos.getZ(i3 + 1);
+    const cx = pos.getX(i3 + 2), cy = pos.getY(i3 + 2), cz = pos.getZ(i3 + 2);
+
+    const da = (ax - hx) * vdx + (ay - hy) * vdy + (az - hz) * vdz;
+    const db = (bx - hx) * vdx + (by - hy) * vdy + (bz - hz) * vdz;
+    const dc = (cx - hx) * vdx + (cy - hy) * vdy + (cz - hz) * vdz;
+
+    const d2 = distSqPointToTri(
+      hx, hy, hz,
+      ax - da * vdx, ay - da * vdy, az - da * vdz,
+      bx - db * vdx, by - db * vdy, bz - db * vdz,
+      cx - dc * vdx, cy - dc * vdy, cz - dc * vdz
+    );
+    if (d2 > r2) continue; // outside cylinder — don't paint, don't expand
+
+    cb(cur);
+
+    const nbrs = adjacency[cur];
+    if (!nbrs) continue;
+    for (let k = 0; k < nbrs.length; k++) {
+      const nb = nbrs[k].neighbor;
+      if (visited[nb]) continue;
+      visited[nb] = 1;
+      // Cull back-facing neighbors: front-facing means normal opposes view dir
+      // (their dot with viewDir is negative). Eq-zero (perpendicular) also
+      // culled — that's the seam at the silhouette where BFS should stop.
+      const nbi = nb * 3;
+      const dotN = faceNormals[nbi]   * vdx
+                 + faceNormals[nbi+1] * vdy
+                 + faceNormals[nbi+2] * vdz;
+      if (dotN >= 0) continue;
+      queue.push(nb);
+    }
   }
-  _spatialGrid = grid;
 }
 
-/** Test all triangles against a sphere and invoke cb(triIdx) for each hit. */
-function forEachTriInSphere(hitPt, r2, cb) {
-  const usePrecision = precisionMaskingEnabled && precisionGeometry;
-  const geo = usePrecision ? precisionGeometry : currentGeometry;
-  const centroids = usePrecision ? precisionCentroids : triangleCentroids;
-  const boundRadii = usePrecision ? precisionBoundRadii : triangleBoundRadii;
-  const pos = geo.attributes.position;
-  const r = Math.sqrt(r2);
-
-  if (!_spatialGrid) {
-    // Fallback: linear scan (grid not built yet)
-    const triCount = centroids.length / 3;
-    for (let t = 0; t < triCount; t++) {
-      const dx = centroids[t*3] - hitPt.x, dy = centroids[t*3+1] - hitPt.y, dz = centroids[t*3+2] - hitPt.z;
-      const bound = r + boundRadii[t];
-      if (dx*dx + dy*dy + dz*dz > bound*bound) continue;
-      const i = t * 3;
-      const d2 = distSqPointToTri(hitPt.x, hitPt.y, hitPt.z,
-        pos.getX(i), pos.getY(i), pos.getZ(i),
-        pos.getX(i+1), pos.getY(i+1), pos.getZ(i+1),
-        pos.getX(i+2), pos.getY(i+2), pos.getZ(i+2));
-      if (d2 <= r2) cb(t);
-    }
-    return;
-  }
-
-  const cs = _spatialCellSize;
-  const xMin = Math.floor((hitPt.x - r - _spatialMinX) / cs);
-  const xMax = Math.floor((hitPt.x + r - _spatialMinX) / cs);
-  const yMin = Math.floor((hitPt.y - r - _spatialMinY) / cs);
-  const yMax = Math.floor((hitPt.y + r - _spatialMinY) / cs);
-  const zMin = Math.floor((hitPt.z - r - _spatialMinZ) / cs);
-  const zMax = Math.floor((hitPt.z + r - _spatialMinZ) / cs);
-
-  for (let gx = xMin; gx <= xMax; gx++) {
-    for (let gy = yMin; gy <= yMax; gy++) {
-      for (let gz = zMin; gz <= zMax; gz++) {
-        const key = (gx * 73856093) ^ (gy * 19349663) ^ (gz * 83492791);
-        const list = _spatialGrid.get(key);
-        if (!list) continue;
-        for (let li = 0; li < list.length; li++) {
-          const t = list[li];
-          const dx = centroids[t*3] - hitPt.x, dy = centroids[t*3+1] - hitPt.y, dz = centroids[t*3+2] - hitPt.z;
-          const bound = r + boundRadii[t];
-          if (dx*dx + dy*dy + dz*dz > bound*bound) continue;
-          const i = t * 3;
-          const d2 = distSqPointToTri(hitPt.x, hitPt.y, hitPt.z,
-            pos.getX(i), pos.getY(i), pos.getZ(i),
-            pos.getX(i+1), pos.getY(i+1), pos.getZ(i+1),
-            pos.getX(i+2), pos.getY(i+2), pos.getZ(i+2));
-          if (d2 <= r2) cb(t);
-        }
-      }
-    }
-  }
+const _viewDirScratch = new THREE.Vector3();
+function _viewDirFor(hitPt) {
+  return _viewDirScratch.subVectors(hitPt, getCamera().position).normalize();
 }
 
 function _paintSingleHit(hit, mesh) {
@@ -1185,7 +1957,7 @@ function _paintSingleHit(hit, mesh) {
   if (usePrecision) {
     if (brushIsRadius) {
       const r2 = brushRadius * brushRadius;
-      forEachTriInSphere(hit.point, r2, t => {
+      bfsBrushSelect(hit.faceIndex, hit.point, r2, _viewDirFor(hit.point), t => {
         if (eraseMode) precisionExcludedFaces.delete(t); else precisionExcludedFaces.add(t);
       });
     } else {
@@ -1199,7 +1971,7 @@ function _paintSingleHit(hit, mesh) {
     }
     if (brushIsRadius) {
       const r2 = brushRadius * brushRadius;
-      forEachTriInSphere(hit.point, r2, t => {
+      bfsBrushSelect(triIdx, hit.point, r2, _viewDirFor(hit.point), t => {
         if (eraseMode) excludedFaces.delete(t); else excludedFaces.add(t);
       });
     } else {
@@ -1297,6 +2069,8 @@ function togglePlaceOnFace(active) {
   if (active) {
     // Deactivate exclusion tool
     if (exclusionTool) setExclusionTool(null);
+    // Deactivate rotate mode
+    if (rotateActive) toggleRotateMode(false);
     // Deactivate precision masking (geometry will be rotated/replaced)
     if (precisionMaskingEnabled) deactivatePrecisionMasking();
     canvas.style.cursor = 'crosshair';
@@ -1366,6 +2140,14 @@ function handlePlaceOnFaceClick(e) {
 
   // Now reload as if this were a freshly loaded STL
   currentBounds = computeBounds(currentGeometry);
+  // Geometry rotated — cylinder axis settings tied to old XY are stale.
+  settings.cylinderCenterX = null;
+  settings.cylinderCenterY = null;
+  settings.cylinderRadius  = null;
+  _cylSilhouetteCanvas = null;
+  _cylSilhouetteGeometry = null;
+  _cylSilhouetteAnchor = null;
+  updateCylinderUIVisibility();
   checkAmplitudeWarning();
   checkResolutionWarning();
 
@@ -1385,7 +2167,7 @@ function handlePlaceOnFaceClick(e) {
   // Reset precision masking (geometry was rotated)
   if (precisionGeometry) { precisionGeometry.dispose(); precisionGeometry = null; }
   precisionParentMap = null; precisionEdgeLength = null;
-  precisionCentroids = null; precisionBoundRadii = null; precisionAdjacency = null;
+  precisionCentroids = null; precisionFaceNormals = null; precisionAdjacency = null;
   precisionMaskingEnabled = false; precisionMaskingToggle.checked = false;
   precisionStatus.textContent = '';
   precisionOutdated.classList.add('hidden'); precisionRefreshBtn.classList.add('hidden');
@@ -1408,8 +2190,8 @@ function handlePlaceOnFaceClick(e) {
   // Rebuild adjacency
   const adjData = buildAdjacency(currentGeometry);
   triangleAdjacency = adjData.adjacency;
-  triangleCentroids = adjData.centroids; triangleBoundRadii = adjData.boundRadii;
-  buildSpatialGrid(triangleCentroids, currentGeometry.attributes.position.count / 3, currentBounds);
+  triangleCentroids = adjData.centroids;
+  triangleFaceNormals = adjData.faceNormals;
 
   // Update edge length for new bounds
   const diag = Math.sqrt(currentBounds.size.x ** 2 + currentBounds.size.y ** 2 + currentBounds.size.z ** 2);
@@ -1429,6 +2211,7 @@ function handlePlaceOnFaceClick(e) {
 
   exportBtn.disabled = (activeMapEntry === null);
   export3mfBtn.disabled = (activeMapEntry === null);
+  bakeBtn.disabled = (activeMapEntry === null);
   updatePreview();
 
   // Rebuild exclusion overlay with new vertex positions (face indices unchanged)
@@ -1440,6 +2223,163 @@ function handlePlaceOnFaceClick(e) {
 
   // Exit place-on-face mode
   togglePlaceOnFace(false);
+}
+
+// ── Rotate Mode ──────────────────────────────────────────────────────────────
+
+function toggleRotateMode(active) {
+  rotateActive = active;
+  rotateBtn.classList.toggle('active', active);
+  rotateControls.classList.toggle('hidden', !active);
+
+  if (active) {
+    // Deactivate conflicting modes
+    if (placeOnFaceActive) togglePlaceOnFace(false);
+    if (exclusionTool) setExclusionTool(null);
+
+    // Snapshot original positions for reset
+    if (currentGeometry) {
+      _rotateOriginalPositions = new Float32Array(currentGeometry.attributes.position.array);
+    }
+    rotateAngles = { x: 0, y: 0, z: 0 };
+    rotateXInput.value = '0'; rotateYInput.value = '0'; rotateZInput.value = '0';
+
+    // Show gizmo
+    setRotationGizmo(true, handleGizmoDrag);
+  } else {
+    setRotationGizmo(false);
+    _rotateOriginalPositions = null;
+
+    // Full rebuild now that rotation is done
+    _rotateFinalize();
+  }
+}
+
+function handleGizmoDrag(axis, deltaDegrees) {
+  if (!currentGeometry) return;
+
+  // Accumulate the angle
+  rotateAngles[axis] = ((rotateAngles[axis] || 0) + deltaDegrees) % 360;
+
+  // Update input fields
+  rotateXInput.value = Math.round(rotateAngles.x * 100) / 100;
+  rotateYInput.value = Math.round(rotateAngles.y * 100) / 100;
+  rotateZInput.value = Math.round(rotateAngles.z * 100) / 100;
+
+  // Apply incremental rotation to geometry
+  applyIncrementalRotation(axis, THREE.MathUtils.degToRad(deltaDegrees));
+}
+
+function applyIncrementalRotation(axis, radians) {
+  const quat = new THREE.Quaternion();
+  if (axis === 'x') quat.setFromAxisAngle(new THREE.Vector3(1, 0, 0), radians);
+  else if (axis === 'y') quat.setFromAxisAngle(new THREE.Vector3(0, 1, 0), radians);
+  else quat.setFromAxisAngle(new THREE.Vector3(0, 0, 1), radians);
+
+  _rotateGeometry(quat);
+}
+
+function applyRotationFromInputs() {
+  if (!currentGeometry) return;
+
+  const targetX = parseFloat(rotateXInput.value) || 0;
+  const targetY = parseFloat(rotateYInput.value) || 0;
+  const targetZ = parseFloat(rotateZInput.value) || 0;
+
+  // Compute delta from current accumulated angles
+  const dx = targetX - rotateAngles.x;
+  const dy = targetY - rotateAngles.y;
+  const dz = targetZ - rotateAngles.z;
+
+  if (Math.abs(dx) < 0.001 && Math.abs(dy) < 0.001 && Math.abs(dz) < 0.001) return;
+
+  // Apply as Euler XYZ rotation delta
+  const euler = new THREE.Euler(
+    THREE.MathUtils.degToRad(dx),
+    THREE.MathUtils.degToRad(dy),
+    THREE.MathUtils.degToRad(dz),
+    'XYZ',
+  );
+  const quat = new THREE.Quaternion().setFromEuler(euler);
+
+  rotateAngles.x = targetX;
+  rotateAngles.y = targetY;
+  rotateAngles.z = targetZ;
+
+  _rotateGeometry(quat);
+}
+
+function _rotateGeometry(quat) {
+  const pos = currentGeometry.attributes.position.array;
+  const v = new THREE.Vector3();
+  for (let i = 0; i < pos.length; i += 3) {
+    v.set(pos[i], pos[i + 1], pos[i + 2]);
+    v.applyQuaternion(quat);
+    pos[i]     = v.x;
+    pos[i + 1] = v.y;
+    pos[i + 2] = v.z;
+  }
+
+  // Recompute normals
+  currentGeometry.computeVertexNormals();
+  if (currentGeometry.attributes.faceNormal) {
+    currentGeometry.deleteAttribute('faceNormal');
+  }
+
+  currentGeometry.attributes.position.needsUpdate = true;
+  if (currentGeometry.attributes.normal) {
+    currentGeometry.attributes.normal.needsUpdate = true;
+  }
+
+  // Light update only: swap geometry on mesh, no camera/grid/dimension rebuild
+  setMeshGeometry(currentGeometry);
+  requestRender();
+}
+
+function _rotateFinalize() {
+  if (!currentGeometry) return;
+
+  // Re-center
+  currentGeometry.computeBoundingBox();
+  const center = new THREE.Vector3();
+  currentGeometry.boundingBox.getCenter(center);
+  currentGeometry.translate(-center.x, -center.y, -center.z);
+  currentGeometry.attributes.position.needsUpdate = true;
+
+  // Full refresh
+  currentBounds = computeBounds(currentGeometry);
+  loadGeometry(currentGeometry);
+
+  // Geometry was reauthored (displacement baked in); cylinder silhouette
+  // bitmap is stale. Settings are kept so the user's axis placement still
+  // applies — the part shape didn't change in plan view, only Z displacement.
+  _cylSilhouetteCanvas = null;
+  _cylSilhouetteGeometry = null;
+  _cylSilhouetteAnchor = null;
+  updateCylinderUIVisibility();
+
+  // Rebuild adjacency for exclusion tools
+  const adjData = buildAdjacency(currentGeometry);
+  triangleAdjacency = adjData.adjacency;
+  triangleCentroids = adjData.centroids;
+  triangleFaceNormals = adjData.faceNormals;
+
+  // Rebuild exclusion overlay
+  if (excludedFaces.size > 0) {
+    refreshExclusionOverlay();
+  } else {
+    setExclusionOverlay(null);
+  }
+
+  // Dispose old preview material so it gets recreated
+  if (previewMaterial) {
+    previewMaterial.dispose();
+    previewMaterial = null;
+  }
+
+  checkAmplitudeWarning();
+  checkResolutionWarning();
+  updatePreview();
 }
 
 function refreshExclusionOverlay() {
@@ -1534,7 +2474,14 @@ function updateBrushHover(e) {
   if (brushIsRadius) {
     const r2 = brushRadius * brushRadius;
     const hovered = new Set();
-    forEachTriInSphere(hit.point, r2, t => hovered.add(t));
+    // Hover seed must be in the same index space as bfsBrushSelect uses.
+    // In precision mode that's hit.faceIndex (precision); in disp-preview
+    // mode it's the parent-mapped index; otherwise it's the raw faceIndex.
+    let seed = hit.faceIndex;
+    if (!usePrecision && dispPreviewGeometry && mesh.geometry === dispPreviewGeometry && dispPreviewParentMap) {
+      seed = dispPreviewParentMap[seed];
+    }
+    bfsBrushSelect(seed, hit.point, r2, _viewDirFor(hit.point), t => hovered.add(t));
     setHoverPreview(buildExclusionOverlayGeo(hoverGeo, hovered), hoverColor);
   } else {
     // For single mode with precision, find the refined face index for the hover highlight
@@ -1721,6 +2668,9 @@ function loadDefaultCube() {
   eraseMode         = false;
   isPainting        = false;
   if (placeOnFaceActive) togglePlaceOnFace(false);
+  if (rotateActive) toggleRotateMode(false);
+  rotateAngles = { x: 0, y: 0, z: 0 };
+  rotateXInput.value = '0'; rotateYInput.value = '0'; rotateZInput.value = '0';
   exclBrushBtn.classList.remove('active');
   exclBucketBtn.classList.remove('active');
   exclBrushTypeRow.classList.add('hidden');
@@ -1734,8 +2684,8 @@ function loadDefaultCube() {
 
   const adjData = buildAdjacency(geo);
   triangleAdjacency = adjData.adjacency;
-  triangleCentroids = adjData.centroids; triangleBoundRadii = adjData.boundRadii;
-  buildSpatialGrid(triangleCentroids, geo.attributes.position.count / 3, currentBounds);
+  triangleCentroids = adjData.centroids;
+  triangleFaceNormals = adjData.faceNormals;
 
   settings.scaleU  = 0.5; scaleUSlider.value = scaleToPos(0.5); scaleUVal.value = 0.5;
   settings.scaleV  = 0.5; scaleVSlider.value = scaleToPos(0.5); scaleVVal.value = 0.5;
@@ -1759,10 +2709,12 @@ function loadDefaultCube() {
 
   exportBtn.disabled = (activeMapEntry === null);
   export3mfBtn.disabled = (activeMapEntry === null);
+  bakeBtn.disabled = (activeMapEntry === null);
   updatePreview();
 }
 
 async function handleModelFile(file) {
+  _undoApplyDepth++;
   try {
     const { geometry, bounds, nanCount, degenerateCount } = await loadModelFile(file);
 
@@ -1802,6 +2754,17 @@ async function handleModelFile(file) {
     mappingSelect.value = String(settings.mappingMode);
     capAngleRow.style.display = settings.mappingMode === 3 ? '' : 'none';
 
+    // Fresh model → reset cylinder axis to AABB defaults so the gizmo lands on
+    // a sensible starting point. (Project snapshot restore overrides this
+    // afterwards if it has explicit cylinderCenterX/Y/radius values.)
+    settings.cylinderCenterX = null;
+    settings.cylinderCenterY = null;
+    settings.cylinderRadius  = null;
+    _cylSilhouetteCanvas = null;
+    _cylSilhouetteGeometry = null;
+    _cylSilhouetteAnchor = null;
+    updateCylinderUIVisibility();
+
     // Show mesh with a default material until a map is selected
     loadGeometry(geometry);
     dropHint.classList.add('hidden');
@@ -1816,7 +2779,7 @@ async function handleModelFile(file) {
     precisionParentMap  = null;
     precisionEdgeLength = null;
     precisionCentroids  = null;
-    precisionBoundRadii = null;
+    precisionFaceNormals = null;
     precisionAdjacency  = null;
     precisionMaskingEnabled = false;
     precisionMaskingToggle.checked = false;
@@ -1840,6 +2803,9 @@ async function handleModelFile(file) {
     eraseMode         = false;
     isPainting        = false;
     if (placeOnFaceActive) togglePlaceOnFace(false);
+    if (rotateActive) toggleRotateMode(false);
+    rotateAngles = { x: 0, y: 0, z: 0 };
+    rotateXInput.value = '0'; rotateYInput.value = '0'; rotateZInput.value = '0';
     exclBrushBtn.classList.remove('active');
     exclBucketBtn.classList.remove('active');
     exclBrushTypeRow.classList.add('hidden');
@@ -1854,19 +2820,15 @@ async function handleModelFile(file) {
     // typical STL sizes processed by this tool)
     const adjData = buildAdjacency(geometry);
     triangleAdjacency = adjData.adjacency;
-    triangleCentroids = adjData.centroids; triangleBoundRadii = adjData.boundRadii;
-    buildSpatialGrid(triangleCentroids, geometry.attributes.position.count / 3, bounds);
+    triangleCentroids = adjData.centroids;
+    triangleFaceNormals = adjData.faceNormals;
     updateMeshDiagnostics(adjData, geometry.attributes.position.count / 3);
 
-    // Reset scale & offset sliders so scale=1 = one tile covers the full bounding box
-    const resetVal = (slider, valEl, value) => {
-      slider.value = value;
-      valEl.value = value;
-    };
-    settings.scaleU  = 0.5; scaleUSlider.value = scaleToPos(0.5); scaleUVal.value = 0.5;
-    settings.scaleV  = 0.5; scaleVSlider.value = scaleToPos(0.5); scaleVVal.value = 0.5;
-    settings.offsetU = 0; resetVal(offsetUSlider, offsetUVal, 0);
-    settings.offsetV = 0; resetVal(offsetVSlider, offsetVVal, 0);
+    // Carry scale, offset, rotation, and all other tuning across model swaps —
+    // they're normalized to the bounding box so they apply meaningfully to the
+    // new mesh. Output resolution is the one exception: it's recomputed below
+    // from the new model's diagonal so a default-sized edge length still makes
+    // sense whether the user just loaded a thumb-sized part or a 1m piece.
     triLimitWarning.classList.add('hidden');
 
     // Default edge length = 1/250 of the bounding box diagonal
@@ -1890,6 +2852,11 @@ async function handleModelFile(file) {
   } catch (err) {
     console.error('Failed to load model:', err);
     alert(t('alerts.loadFailed', { msg: err.message }));
+  } finally {
+    _undoApplyDepth--;
+    // Mask indices reference the freshly-loaded triangle set, so any prior
+    // history is meaningless for the new geometry.
+    _clearUndoStacks();
   }
 }
 
@@ -1898,7 +2865,7 @@ async function handleModelFile(file) {
 function checkAmplitudeWarning() {
   if (!currentBounds) return;
   const minDim = Math.min(currentBounds.size.x, currentBounds.size.y, currentBounds.size.z);
-  const danger = Math.abs(settings.amplitude) > minDim * 0.1;
+  const danger = settings.textureHeight > minDim * 0.1;
   amplitudeWarning.classList.toggle('hidden', !danger);
   amplitudeSlider.classList.toggle('amp-danger', danger);
   amplitudeVal.classList.toggle('amp-danger', danger);
@@ -1923,6 +2890,7 @@ function applyDiagSeverity() {
   }
   meshDiagnostics.classList.remove('diag-ok', 'diag-warn', 'diag-error');
   meshDiagnostics.classList.add('diag-' + severity);
+  meshDiagnostics.classList.toggle('diag-corner-tr', severity !== 'ok');
 }
 
 function clearDiagHighlight() {
@@ -2675,6 +3643,7 @@ function updatePreview() {
     }
     exportBtn.disabled = true;
     export3mfBtn.disabled = true;
+    bakeBtn.disabled = true;
     return;
   }
 
@@ -2700,6 +3669,7 @@ function updatePreview() {
   syncBoundaryEdgeUniforms();
   exportBtn.disabled = false;
   export3mfBtn.disabled = false;
+  bakeBtn.disabled = isBaking;
 }
 
 // ── Displacement preview ──────────────────────────────────────────────────────
@@ -2846,13 +3816,9 @@ function deactivatePrecisionMasking() {
     currentGeometry = precisionGeometry;
 
     // Promote precision adjacency data to the base adjacency
-    triangleAdjacency  = precisionAdjacency;
-    triangleCentroids  = precisionCentroids;
-    triangleBoundRadii = precisionBoundRadii;
-
-    // Rebuild spatial grid for the promoted base mesh
-    const triCount = currentGeometry.attributes.position.count / 3;
-    buildSpatialGrid(triangleCentroids, triCount, currentBounds);
+    triangleAdjacency   = precisionAdjacency;
+    triangleCentroids   = precisionCentroids;
+    triangleFaceNormals = precisionFaceNormals;
 
     // Promote precision excluded faces to the base set
     excludedFaces = precisionExcludedFaces;
@@ -2877,7 +3843,7 @@ function deactivatePrecisionMasking() {
   precisionParentMap  = null;
   precisionEdgeLength = null;
   precisionCentroids  = null;
-  precisionBoundRadii = null;
+  precisionFaceNormals = null;
   precisionAdjacency  = null;
   precisionMaskingEnabled = false;
   precisionMaskingToggle.checked = false;
@@ -2932,13 +3898,9 @@ async function refreshPrecisionMesh() {
 
     // Build adjacency data for the refined mesh
     const adjData = buildAdjacency(precisionGeometry);
-    precisionAdjacency  = adjData.adjacency;
-    precisionCentroids  = adjData.centroids;
-    precisionBoundRadii = adjData.boundRadii;
-
-    // Rebuild spatial grid for the precision mesh so brush queries are fast
-    const precTriCount = precisionGeometry.attributes.position.count / 3;
-    buildSpatialGrid(precisionCentroids, precTriCount, currentBounds);
+    precisionAdjacency   = adjData.adjacency;
+    precisionCentroids   = adjData.centroids;
+    precisionFaceNormals = adjData.faceNormals;
 
     // Seed precisionExcludedFaces from existing excludedFaces
     precisionExcludedFaces = new Set();
@@ -3167,7 +4129,7 @@ function buildCombinedFaceWeights(geometry, excludedFaces, invert, settings) {
 }
 
 async function handleExport(format = 'stl') {
-  if (!currentGeometry || !activeMapEntry || isExporting) return;
+  if (!currentGeometry || !activeMapEntry || isExporting || isBaking) return;
   const myToken = ++exportToken;
   isExporting = true;
   exportBtn.classList.add('busy');
@@ -3338,6 +4300,284 @@ function setProgress(fraction, label) {
   exportProgLbl.textContent = label;
 }
 
+function setBakeProgress(fraction, label) {
+  const pct = Math.round(fraction * 100);
+  bakeProgBar.style.width = `${pct}%`;
+  bakeProgPct.textContent = `${pct}%`;
+  bakeProgLbl.textContent = label;
+}
+
+// ── Bake Textures (beta) ─────────────────────────────────────────────────────
+// Apply the current displacement texture to currentGeometry and adopt the
+// result as the working model so the user can keep editing on the textured
+// mesh. By default, masks the just-baked faces in the new exclusion set.
+//
+// Pipeline: subdivide → applyDisplacement → (optional) flat-bottom clamp.
+// Decimation is intentionally skipped — decimate() drops the per-face parent
+// mapping needed to translate "which input faces were textured" into the new
+// mesh's triangle indices. Final decimation still happens on Export.
+async function bakeTextures() {
+  if (!currentGeometry || !activeMapEntry || isBaking || isExporting) return;
+  isBaking = true;
+  bakeBtn.classList.add('busy');
+  bakeBtn.disabled = true;
+  bakeProgress.classList.remove('hidden');
+
+  if (precisionMaskingEnabled) deactivatePrecisionMasking();
+
+  let subdivided = null;
+  let displaced  = null;
+  let succeeded  = false;
+
+  try {
+    setBakeProgress(0.02, t('progress.subdividing'));
+    await yieldFrame();
+
+    // Mirror handleExport's pre-flight: combine user mask + angle masking
+    // into per-vertex weights for subdivision.
+    const hasAngleMask = settings.bottomAngleLimit > 0 || settings.topAngleLimit > 0;
+    const faceWeights = (excludedFaces.size > 0 || selectionMode || hasAngleMask)
+      ? buildCombinedFaceWeights(currentGeometry, excludedFaces, selectionMode, settings)
+      : null;
+
+    let faceParentId;
+    ({ geometry: subdivided, faceParentId } = await subdivide(
+      currentGeometry, settings.refineLength,
+      (p, triCount, longestEdge) => {
+        const label = triCount != null
+          ? t('progress.refining', { cur: triCount.toLocaleString(), edge: longestEdge.toFixed(2) })
+          : t('progress.subdividing');
+        setBakeProgress(0.02 + p * 0.45, label);
+      },
+      faceWeights
+    ));
+
+    const subTriCount = subdivided.attributes.position.count / 3;
+    setBakeProgress(0.47, t('progress.applyingDisplacement', { n: subTriCount.toLocaleString() }));
+
+    const exportEntry = getEffectiveMapEntry();
+    displaced = await runAsync(() =>
+      applyDisplacement(
+        subdivided,
+        exportEntry.imageData,
+        exportEntry.width,
+        exportEntry.height,
+        settings,
+        currentBounds,
+        (p) => setBakeProgress(0.47 + p * 0.40, t('progress.displacingVertices'))
+      )
+    );
+
+    // Free pre-displacement subdivision — applyDisplacement returns a separate copy.
+    subdivided.dispose();
+    subdivided = null;
+
+    // Mirror the export-side flat-bottom clamp.
+    if (settings.bottomAngleLimit > 0) {
+      const bottomZ = currentBounds.min.z;
+      const pa = displaced.attributes.position.array;
+      const na = displaced.attributes.normal ? displaced.attributes.normal.array : new Float32Array(pa.length);
+
+      for (let i = 0; i < pa.length; i += 9) {
+        let dirty = false;
+        if (pa[i+2] < bottomZ) { pa[i+2] = bottomZ; dirty = true; }
+        if (pa[i+5] < bottomZ) { pa[i+5] = bottomZ; dirty = true; }
+        if (pa[i+8] < bottomZ) { pa[i+8] = bottomZ; dirty = true; }
+
+        if (dirty) {
+          const ux = pa[i+3]-pa[i],   uy = pa[i+4]-pa[i+1], uz = pa[i+5]-pa[i+2];
+          const vx = pa[i+6]-pa[i],   vy = pa[i+7]-pa[i+1], vz = pa[i+8]-pa[i+2];
+          const nx = uy*vz-uz*vy, ny = uz*vx-ux*vz, nz = ux*vy-uy*vx;
+          const len = Math.sqrt(nx*nx+ny*ny+nz*nz) || 1;
+          na[i]   = na[i+3] = na[i+6] = nx/len;
+          na[i+1] = na[i+4] = na[i+7] = ny/len;
+          na[i+2] = na[i+5] = na[i+8] = nz/len;
+        }
+      }
+
+      displaced.attributes.position.needsUpdate = true;
+      if (!displaced.attributes.normal) displaced.setAttribute('normal', new THREE.Float32BufferAttribute(na, 3));
+      else displaced.attributes.normal.needsUpdate = true;
+    }
+
+    setBakeProgress(0.90, t('progress.finalizing'));
+    await yieldFrame();
+
+    // Build the new exclusion set: every output triangle whose parent face
+    // was NOT excluded (by user paint, selectionMode, or angle masking) got
+    // textured this round → mask it on the new mesh so a follow-up texture
+    // pass won't double-up. faceWeights[parentIdx*3] > 0.99 captures all
+    // three exclusion paths in a single check (it's the same predicate
+    // subdivide uses to skip subdividing those faces).
+    let preExcluded = null;
+    if (bakeMaskChk.checked) {
+      preExcluded = [];
+      const wasParentExcluded = faceWeights
+        ? (parentIdx) => faceWeights[parentIdx * 3] > 0.99
+        : () => false; // no exclusions at all → every face was textured
+      for (let i = 0; i < faceParentId.length; i++) {
+        if (!wasParentExcluded(faceParentId[i])) preExcluded.push(i);
+      }
+    }
+
+    // Compute new bounds from the displaced geometry. Do NOT re-center —
+    // the displaced mesh is approximately at the same location, and
+    // re-centering would shift the user's frame of reference.
+    displaced.computeBoundingBox();
+    const bb = displaced.boundingBox;
+    const newBounds = {
+      min:    bb.min.clone(),
+      max:    bb.max.clone(),
+      size:   new THREE.Vector3().subVectors(bb.max, bb.min),
+      center: new THREE.Vector3().addVectors(bb.min, bb.max).multiplyScalar(0.5),
+    };
+
+    adoptBakedGeometry(displaced, newBounds, { preExcludedFaces: preExcluded });
+    displaced = null; // ownership transferred to currentGeometry
+
+    succeeded = true;
+    setBakeProgress(1.0, t('progress.done'));
+    setTimeout(() => { bakeProgress.classList.add('hidden'); setBakeProgress(0, ''); }, 1200);
+  } catch (err) {
+    console.error('Bake failed:', err);
+    if (/maximum size|out of memory|alloc/i.test(err.message)) {
+      alert(t('alerts.exportOOM'));
+    } else {
+      alert(t('alerts.bakeFailed', { msg: err.message }));
+    }
+  } finally {
+    if (subdivided) subdivided.dispose();
+    if (displaced)  displaced.dispose();
+    if (!succeeded) bakeProgress.classList.add('hidden');
+    isBaking = false;
+    bakeBtn.classList.remove('busy');
+    bakeBtn.disabled = (activeMapEntry === null);
+  }
+}
+
+// Replace currentGeometry with `geometry` and reset per-model state without
+// touching the user's texture/settings. Mirrors the relevant subset of
+// handleModelFile but keeps activeMapEntry, settings, and refineLength as-is,
+// and seeds excludedFaces from opts.preExcludedFaces.
+function adoptBakedGeometry(geometry, bounds, opts = {}) {
+  // Invalidate any in-flight async operations tied to the previous mesh.
+  precisionToken++;
+  dispPreviewToken++;
+  exportToken++;
+  diagToken++;
+
+  // Dispose the previous working geometry so we don't leak GPU buffers. Note
+  // that it's still referenced by previewMaterial/loadGeometry until we swap
+  // those — but loadGeometry below replaces the visible mesh, and Three's
+  // BufferGeometry.dispose() only frees GPU resources (CPU arrays remain
+  // valid for any code that still holds the reference).
+  if (currentGeometry && currentGeometry !== geometry) currentGeometry.dispose();
+
+  currentGeometry = geometry;
+  currentBounds   = bounds;
+  currentStlName  = `${currentStlName}_baked`;
+  checkAmplitudeWarning();
+
+  // Dispose preview material so updatePreview rebuilds it on the new mesh.
+  if (previewMaterial) {
+    previewMaterial.dispose();
+    previewMaterial = null;
+  }
+
+  // Replace the visible mesh in the viewer.
+  loadGeometry(geometry);
+
+  // Reset displacement preview — its geometry referenced the pre-bake mesh.
+  if (dispPreviewGeometry) { dispPreviewGeometry.dispose(); dispPreviewGeometry = null; }
+  settings.useDisplacement = false;
+  dispPreviewToggle.checked = false;
+
+  // Reset precision masking — its mesh referenced the pre-bake mesh.
+  if (precisionGeometry) { precisionGeometry.dispose(); precisionGeometry = null; }
+  precisionParentMap  = null;
+  precisionEdgeLength = null;
+  precisionCentroids  = null;
+  precisionFaceNormals = null;
+  precisionAdjacency  = null;
+  precisionMaskingEnabled = false;
+  precisionMaskingToggle.checked = false;
+  precisionStatus.textContent = '';
+  precisionOutdated.classList.add('hidden');
+  precisionRefreshBtn.classList.add('hidden');
+  precisionWarning.classList.add('hidden');
+  precisionMaskingRow.classList.add('hidden');
+
+  // Reset mesh diagnostics — they referenced the pre-bake mesh.
+  meshDiagnostics.classList.add('hidden');
+  meshDiagAdvanced.classList.add('hidden');
+  lastFastDiag = null;
+  lastAdvancedDiag = null;
+  clearDiagHighlight();
+
+  // The seeded mask carries exclude-mode semantics ("don't re-texture these
+  // faces"). If the user was in include-only mode pre-bake, that mode would
+  // invert the meaning to "only texture these faces" — exactly backwards. So
+  // force exclude mode before seeding. setSelectionMode also clears
+  // excludedFaces as a side effect, which is fine — we re-seed below.
+  if (selectionMode) setSelectionMode(false);
+
+  // Seed exclusion mask, exit any active painting/place/rotate modes.
+  excludedFaces = new Set(opts.preExcludedFaces || []);
+  precisionExcludedFaces = new Set();
+  exclusionTool = null;
+  eraseMode     = false;
+  isPainting    = false;
+  if (placeOnFaceActive) togglePlaceOnFace(false);
+  if (rotateActive) toggleRotateMode(false);
+  rotateAngles = { x: 0, y: 0, z: 0 };
+  rotateXInput.value = '0'; rotateYInput.value = '0'; rotateZInput.value = '0';
+  exclBrushBtn.classList.remove('active');
+  exclBucketBtn.classList.remove('active');
+  exclBrushTypeRow.classList.add('hidden');
+  exclRadiusRow.classList.add('hidden');
+  exclThresholdRow.classList.add('hidden');
+  canvas.style.cursor = '';
+  setHoverPreview(null);
+  _lastHoverTriIdx = -1;
+
+  // Build adjacency for the new geometry (needed by brush/bucket tools and
+  // by the exclusion overlay).
+  const adjData = buildAdjacency(geometry);
+  triangleAdjacency = adjData.adjacency;
+  triangleCentroids = adjData.centroids;
+  triangleFaceNormals = adjData.faceNormals;
+  updateMeshDiagnostics(adjData, geometry.attributes.position.count / 3);
+
+  // Refresh exclusion overlay using the new geometry + new mask.
+  if (excludedFaces.size > 0) refreshExclusionOverlay();
+  else setExclusionOverlay(null);
+  const maskCount = excludedFaces.size;
+  exclCount.textContent = maskCount === 0
+    ? t('excl.initExcluded')
+    : (maskCount === 1
+      ? (selectionMode ? t('excl.faceSelected', { n: 1 }) : t('excl.faceExcluded', { n: 1 }))
+      : (selectionMode ? t('excl.facesSelected', { n: maskCount }) : t('excl.facesExcluded', { n: maskCount })));
+
+  // Update mesh info display.
+  triLimitWarning.classList.add('hidden');
+  const triCount = getTriangleCount(geometry);
+  const mb = ((geometry.attributes.position.array.byteLength) / 1024 / 1024).toFixed(2);
+  const sx = bounds.size.x.toFixed(2);
+  const sy = bounds.size.y.toFixed(2);
+  const sz = bounds.size.z.toFixed(2);
+  meshInfo.textContent = t('ui.meshInfo', { n: triCount.toLocaleString(), mb, sx, sy, sz });
+
+  exportBtn.disabled = (activeMapEntry === null);
+  export3mfBtn.disabled = (activeMapEntry === null);
+  bakeBtn.disabled = (activeMapEntry === null);
+
+  updatePreview();
+
+  // Bake is a destructive transform — undo history references the pre-bake
+  // triangle set, so it's no longer meaningful.
+  _clearUndoStacks();
+}
+
 /**
  * Yield to the browser event loop, then run fn.
  * Uses setTimeout instead of rAF so it fires even in background tabs.
@@ -3355,3 +4595,644 @@ function runAsync(fn) {
 function yieldFrame() {
   return new Promise(r => setTimeout(r, 0));
 }
+
+// ── Project save/load (.bumpmesh) + sessionStorage auto-save ────────────────
+// .bumpmesh is a ZIP containing: settings.json (required), model.stl (optional),
+// texture.png (optional custom displacement map). Settings alone are also
+// auto-persisted to sessionStorage — so a reload inside the same tab restores
+// the session, but closing the tab (or opening a fresh one later) starts from
+// defaults. One-time migration wipes any legacy localStorage payload.
+
+const PROJECT_STORAGE_KEY = 'bumpmesh-settings';
+const PROJECT_VERSION     = 1;
+const PROJECT_MAX_IMPORT  = 500 * 1024 * 1024; // 500 MB cap on imports
+try { localStorage.removeItem(PROJECT_STORAGE_KEY); } catch { /* ignore */ }
+
+// Persisted setting keys — excludes `useDisplacement` (transient UI state).
+const PERSISTED_KEYS = [
+  'mappingMode', 'scaleU', 'scaleV', 'lockScale',
+  'offsetU', 'offsetV', 'rotation',
+  'amplitude', 'textureHeight', 'invertDisplacement',
+  'symmetricDisplacement', 'noDownwardZ', 'textureSmoothing',
+  'mappingBlend', 'seamBandWidth', 'capAngle', 'boundaryFalloff',
+  'bottomAngleLimit', 'topAngleLimit',
+  'refineLength', 'maxTriangles',
+  // Cylindrical-mode controls. cylinderCenterX/Y/radius are nullable —
+  // null means "fall back to AABB defaults", which is what fresh loads get.
+  'snapSeamlessWrap', 'cylinderCenterX', 'cylinderCenterY', 'cylinderRadius',
+  'cylinderPanelMinimized',
+];
+
+function getSettingsSnapshot() {
+  const snap = {};
+  for (const k of PERSISTED_KEYS) snap[k] = settings[k];
+  if (activeMapEntry) {
+    snap.activeMapName = activeMapEntry.name;
+  } else {
+    // Thumbnails may not have finished loading yet; preserve any previously
+    // persisted preset name so a mid-load autosave doesn't wipe it.
+    try {
+      const prev = JSON.parse(sessionStorage.getItem(PROJECT_STORAGE_KEY) || 'null');
+      snap.activeMapName = (prev && prev.activeMapName) || null;
+    } catch { snap.activeMapName = null; }
+  }
+  return snap;
+}
+
+/**
+ * Apply a settings snapshot to the live UI. Drives each control through the
+ * same event it fires on user input (via dispatchEvent), so linkSlider's
+ * clamp/display/preview flow runs unchanged.
+ */
+function applySettingsSnapshot(snap) {
+  if (!snap) return;
+
+  // Mapping mode first — changes cap-angle row visibility and triggers preview.
+  if (snap.mappingMode != null) {
+    mappingSelect.value = String(snap.mappingMode);
+    mappingSelect.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  // invertDisplacement BEFORE amplitude — the amplitude setter reads the flag.
+  if (snap.invertDisplacement != null) {
+    invertDisplacementCheckbox.checked = snap.invertDisplacement;
+    invertDisplacementCheckbox.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  // Temporarily disable lockScale so U and V can be set independently without
+  // one mirroring the other; restore the saved lock state afterwards.
+  const wantLock = snap.lockScale != null ? snap.lockScale : settings.lockScale;
+  settings.lockScale = false;
+
+  const setLinkedVal = (inputEl, value) => {
+    if (inputEl && value != null) {
+      inputEl.value = value;
+      inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  };
+
+  setLinkedVal(scaleUVal,           snap.scaleU);
+  setLinkedVal(scaleVVal,           snap.scaleV);
+  setLinkedVal(offsetUVal,          snap.offsetU);
+  setLinkedVal(offsetVVal,          snap.offsetV);
+  setLinkedVal(rotationVal,         snap.rotation);
+  setLinkedVal(amplitudeVal,        snap.textureHeight);
+  setLinkedVal(textureSmoothingVal, snap.textureSmoothing);
+  setLinkedVal(seamBlendVal,        snap.mappingBlend);
+  setLinkedVal(seamBandWidthVal,    snap.seamBandWidth);
+  setLinkedVal(capAngleVal,         snap.capAngle);
+  setLinkedVal(boundaryFalloffVal,  snap.boundaryFalloff);
+  setLinkedVal(bottomAngleLimitVal, snap.bottomAngleLimit);
+  setLinkedVal(topAngleLimitVal,    snap.topAngleLimit);
+  setLinkedVal(refineLenVal,        snap.refineLength);
+
+  // maxTriangles uses a <span> for its display, so linkSlider wires it via
+  // the slider's 'input' event, not a val-input 'change'.
+  if (snap.maxTriangles != null) {
+    maxTriSlider.value = snap.maxTriangles;
+    maxTriSlider.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  // Restore saved lock state without invoking the button's click handler
+  // (which would mirror scaleU→scaleV and clobber what we just set).
+  settings.lockScale = wantLock;
+  lockScaleBtn.classList.toggle('active', wantLock);
+  lockScaleBtn.setAttribute('aria-pressed', String(wantLock));
+
+  // Checkboxes
+  if (snap.symmetricDisplacement != null) {
+    symmetricDispToggle.checked = snap.symmetricDisplacement;
+    symmetricDispToggle.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  if (snap.noDownwardZ != null) {
+    noDownwardZChk.checked = snap.noDownwardZ;
+    noDownwardZChk.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  // Cylindrical-mode state. cylinderCenterX/Y/radius pass through unchanged
+  // (null is meaningful — falls back to AABB defaults during projection).
+  if (snap.snapSeamlessWrap != null) {
+    settings.snapSeamlessWrap = !!snap.snapSeamlessWrap;
+    if (cylinderSnapToggle) cylinderSnapToggle.checked = settings.snapSeamlessWrap;
+  }
+  if ('cylinderCenterX' in snap) settings.cylinderCenterX = snap.cylinderCenterX;
+  if ('cylinderCenterY' in snap) settings.cylinderCenterY = snap.cylinderCenterY;
+  if ('cylinderRadius'  in snap) settings.cylinderRadius  = snap.cylinderRadius;
+  if ('cylinderPanelMinimized' in snap) {
+    settings.cylinderPanelMinimized = !!snap.cylinderPanelMinimized;
+    cylinderPanel.classList.toggle('minimized', settings.cylinderPanelMinimized);
+  }
+  updateCylinderUIVisibility();
+}
+
+/**
+ * Find a preset by name and activate it. By default, suppresses preset defaults
+ * (resetTextureSmoothing + defaultScale override) so a just-restored snapshot
+ * isn't clobbered. Pass applyDefaults=true for fresh user-initiated picks.
+ */
+function _selectPresetByName(name, applyDefaults = false) {
+  if (!name) return false;
+  const idx = IMAGE_PRESETS.findIndex(p => p.name === name);
+  if (idx < 0) return false;
+  const swatch = _presetSwatches[idx];
+  if (!swatch) return false;
+  selectPreset(idx, swatch, applyDefaults);
+  return true;
+}
+
+// ── localStorage auto-save ───────────────────────────────────────────────────
+
+let _autoSaveTimer = null;
+let _autoSavePaused = false;
+function _autoSaveSettings() {
+  if (_autoSavePaused) return;
+  clearTimeout(_autoSaveTimer);
+  _autoSaveTimer = setTimeout(() => {
+    try {
+      const payload = { version: PROJECT_VERSION, ...getSettingsSnapshot() };
+      sessionStorage.setItem(PROJECT_STORAGE_KEY, JSON.stringify(payload));
+    } catch { /* quota exceeded or disabled — ignore */ }
+  }, 300);
+}
+
+function _restoreSessionSettings() {
+  let raw;
+  try { raw = sessionStorage.getItem(PROJECT_STORAGE_KEY); }
+  catch { return; }
+  if (!raw) return;
+  let data;
+  try { data = JSON.parse(raw); } catch { return; }
+  if (!data || typeof data !== 'object') return;
+  applySettingsSnapshot(data);
+  // Preset activation is handled by the thumbnail-load auto-select path —
+  // it reads activeMapName from sessionStorage and suppresses defaults so
+  // the user's saved scaleU / textureSmoothing survive.
+}
+
+// Delegate auto-save to input/change bubbling in the settings panel —
+// covers every slider, number input, select, and checkbox in one shot.
+const _settingsPanel = document.getElementById('settings-panel');
+if (_settingsPanel) {
+  _settingsPanel.addEventListener('input', _autoSaveSettings);
+  _settingsPanel.addEventListener('change', _autoSaveSettings);
+}
+// The lock-scale button doesn't emit input/change — catch it separately.
+lockScaleBtn.addEventListener('click', _autoSaveSettings);
+
+// ── Reset to defaults ───────────────────────────────────────────────────────
+// Frozen snapshot of the initial `settings` object plus the default preset
+// name, so the reset button restores exactly what a fresh session starts with.
+
+const DEFAULT_SETTINGS_SNAPSHOT = Object.freeze({
+  mappingMode: 5, scaleU: 0.5, scaleV: 0.5, lockScale: true,
+  offsetU: 0, offsetV: 0, rotation: 0,
+  amplitude: 0.5, textureHeight: 0.5, invertDisplacement: false,
+  symmetricDisplacement: false, noDownwardZ: false, textureSmoothing: 0,
+  mappingBlend: 1, seamBandWidth: 0.5, capAngle: 20, boundaryFalloff: 0,
+  bottomAngleLimit: 5, topAngleLimit: 0,
+  refineLength: 1, maxTriangles: 750000,
+  snapSeamlessWrap: true,
+  cylinderCenterX: null, cylinderCenterY: null, cylinderRadius: null,
+  cylinderPanelMinimized: false,
+  activeMapName: DEFAULT_PRESET_NAME,
+});
+
+function resetSettingsToDefaults() {
+  // Capture any pending edit, then push the pre-reset state so Ctrl+Z
+  // restores all 20 parameters AND the painted mask.
+  _flushUndoCapture();
+  if (_baselineSnapshot) {
+    _undoStack.push(_baselineSnapshot);
+    if (_undoStack.length > UNDO_LIMIT) _undoStack.shift();
+    _redoStack.length = 0;
+  }
+  _undoApplyDepth++;
+  // Pause autosave so each intermediate change event doesn't queue a save;
+  // we clear sessionStorage explicitly below.
+  _autoSavePaused = true;
+  try {
+    // Match handleModelFile: refineLength defaults to ~1/250 of the loaded
+    // model's bounding-box diagonal, clamped to [0.05, 5.0]. Without this the
+    // reset would clobber a sensibly-tuned resolution back to the literal 1.0.
+    const snapshot = { ...DEFAULT_SETTINGS_SNAPSHOT };
+    if (currentBounds && currentBounds.size) {
+      const sz = currentBounds.size;
+      const diag = Math.sqrt(sz.x * sz.x + sz.y * sz.y + sz.z * sz.z);
+      snapshot.refineLength = Math.max(0.05, Math.min(5.0, +(diag / 250).toFixed(2)));
+    }
+    applySettingsSnapshot(snapshot);
+
+    // Clear any painted mask and revert to Exclude mode. setSelectionMode
+    // also clears the face sets, but only when the mode actually changes —
+    // run explicit resets afterwards so we always end up empty.
+    if (selectionMode) setSelectionMode(false);
+    excludedFaces          = new Set();
+    precisionExcludedFaces = new Set();
+    if (currentGeometry) refreshExclusionOverlay();
+
+    const defaultIdx = IMAGE_PRESETS.findIndex(p => p.name === DEFAULT_PRESET_NAME);
+    if (defaultIdx >= 0 && _presetSwatches[defaultIdx] && PRESETS[defaultIdx]) {
+      // applyDefaults=true so the preset's defaultScale overrides whatever
+      // scale the user had — matches the "fresh session" intent.
+      selectPreset(defaultIdx, _presetSwatches[defaultIdx], true);
+    }
+    try { sessionStorage.removeItem(PROJECT_STORAGE_KEY); } catch { /* ignore */ }
+  } finally {
+    _autoSavePaused = false;
+    _undoApplyDepth--;
+    _baselineSnapshot = _captureUndoSnapshot();
+    _updateUndoButtons();
+  }
+}
+
+const resetSettingsBtn = document.getElementById('reset-settings-btn');
+if (resetSettingsBtn) {
+  resetSettingsBtn.addEventListener('click', () => {
+    if (confirm(t('alerts.resetConfirm'))) resetSettingsToDefaults();
+  });
+}
+
+// ── Export: build .bumpmesh ZIP and trigger download ─────────────────────────
+
+const exportProjectBtn  = document.getElementById('export-project-btn');
+const exportDialog      = document.getElementById('export-dialog');
+const exportGoBtn       = document.getElementById('export-go-btn');
+const exportModelChk    = document.getElementById('export-model-chk');
+const exportTextureChk  = document.getElementById('export-texture-chk');
+const exportTextureRow  = document.getElementById('export-texture-row');
+const importProjectInput = document.getElementById('import-project-input');
+
+exportProjectBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  // Offer custom-texture export whenever one has been uploaded this session,
+  // even if a preset is currently active — _lastCustomMap survives preset switches.
+  const hasCustom = !!(_lastCustomMap && _lastCustomMap.fullCanvas);
+  exportModelChk.disabled = !currentGeometry;
+  if (!currentGeometry) exportModelChk.checked = false;
+  exportTextureRow.classList.toggle('hidden', !hasCustom);
+  if (!hasCustom) exportTextureChk.checked = false;
+  exportDialog.classList.toggle('hidden');
+});
+
+// Close dialog on outside click.
+document.addEventListener('click', (e) => {
+  if (exportDialog.classList.contains('hidden')) return;
+  if (!exportDialog.contains(e.target) && e.target !== exportProjectBtn && !exportProjectBtn.contains(e.target)) {
+    exportDialog.classList.add('hidden');
+  }
+});
+
+exportGoBtn.addEventListener('click', async () => {
+  exportDialog.classList.add('hidden');
+  try {
+    const includeModel   = exportModelChk.checked && !!currentGeometry;
+    const customSource   = (_lastCustomMap && _lastCustomMap.fullCanvas) ? _lastCustomMap : null;
+    const includeTexture = exportTextureChk.checked && !!customSource;
+
+    const payload = { version: PROJECT_VERSION, ...getSettingsSnapshot() };
+    // Mark the custom map as the active reference so the importer restores it
+    // even if the user has a preset selected at export time.
+    if (includeTexture) payload.activeMapName = customSource.name;
+    const zipFiles = { 'settings.json': strToU8(JSON.stringify(payload, null, 2)) };
+
+    if (includeModel) {
+      zipFiles['model.stl'] = _geometryToBinarySTL(currentGeometry);
+      // Mask indices reference the base geometry's triangles, so they only make
+      // sense when shipped alongside the model that produced them.
+      const mask = _collectCurrentMask();
+      if (mask) zipFiles['mask.json'] = strToU8(JSON.stringify(mask));
+    }
+    if (includeTexture) {
+      const blob = await new Promise(r => customSource.fullCanvas.toBlob(r, 'image/png'));
+      zipFiles['texture.png'] = new Uint8Array(await blob.arrayBuffer());
+    }
+
+    const zipped = zipSync(zipFiles);
+    _downloadBlob(new Blob([zipped], { type: 'application/octet-stream' }),
+                  (currentStlName || 'bumpmesh') + '.bumpmesh');
+  } catch (err) {
+    alert(t('alerts.exportFailed', { msg: err.message }));
+  }
+});
+
+/** Pack a BufferGeometry into binary-STL bytes (80-byte header, uint32 count, 50 bytes per triangle). */
+function _geometryToBinarySTL(geo) {
+  const pos = geo.attributes.position.array;
+  const nor = geo.attributes.normal ? geo.attributes.normal.array : null;
+  const triCount = (pos.length / 9) | 0;
+  const buf = new ArrayBuffer(84 + 50 * triCount);
+  const bytes = new Uint8Array(buf);
+  const view = new DataView(buf);
+  view.setUint32(80, triCount, true);
+  // Copy per-triangle normal + 3 vertex positions. If no normal attribute,
+  // leave the normal slot as zeros — slicers compute per-face normals anyway.
+  for (let i = 0; i < triCount; i++) {
+    const dst = 84 + i * 50;
+    const srcPos = i * 9;
+    if (nor) {
+      const srcNor = i * 9;
+      view.setFloat32(dst,     nor[srcNor],     true);
+      view.setFloat32(dst + 4, nor[srcNor + 1], true);
+      view.setFloat32(dst + 8, nor[srcNor + 2], true);
+    }
+    for (let v = 0; v < 3; v++) {
+      const d = dst + 12 + v * 12;
+      view.setFloat32(d,     pos[srcPos + v * 3],     true);
+      view.setFloat32(d + 4, pos[srcPos + v * 3 + 1], true);
+      view.setFloat32(d + 8, pos[srcPos + v * 3 + 2], true);
+    }
+  }
+  return bytes;
+}
+
+/**
+ * Snapshot the current paint mask (selection mode + excluded face indices into
+ * the *base* geometry). Returns null when there's nothing meaningful to save —
+ * i.e. exclude-mode with no painted faces.
+ *
+ * If precision masking is active, collapse `precisionExcludedFaces` back to
+ * base-geometry indices via `precisionParentMap`, mirroring the collapse that
+ * happens when the user disables precision (line 3193).
+ */
+function _collectCurrentMask() {
+  let liveExcluded;
+  if (precisionMaskingEnabled && precisionParentMap && precisionExcludedFaces.size > 0) {
+    liveExcluded = new Set();
+    for (const pf of precisionExcludedFaces) liveExcluded.add(precisionParentMap[pf]);
+  } else {
+    liveExcluded = excludedFaces;
+  }
+  // Include-mode with zero painted = "mask everything" — also worth preserving.
+  if (liveExcluded.size === 0 && !selectionMode) return null;
+  return { selectionMode, excluded: [...liveExcluded] };
+}
+
+/**
+ * Apply a saved mask to the currently-loaded geometry. Filters out indices
+ * that would be out-of-range for the loaded mesh (defensive — the .bumpmesh
+ * file always ships its own model, but we still validate).
+ */
+function _restoreMask(mask) {
+  if (!currentGeometry) return;
+  // null mask = exclude-mode with zero painted faces (the implicit default).
+  // Without this branch, undoing back to the empty baseline would leave the
+  // previously-painted mask on screen because the early-return skipped the
+  // clear, making subsequent undo/redo appear broken.
+  if (!mask) {
+    if (selectionMode) setSelectionMode(false); // also clears the face sets
+    excludedFaces = new Set();
+    precisionExcludedFaces = new Set();
+    refreshExclusionOverlay();
+    return;
+  }
+  const triCount = (currentGeometry.attributes.position.count / 3) | 0;
+  // setSelectionMode clears any current paint, so flip mode FIRST then seed.
+  if (mask.selectionMode === true)  setSelectionMode(true);
+  else if (mask.selectionMode === false && selectionMode) setSelectionMode(false);
+
+  const valid = (Array.isArray(mask.excluded) ? mask.excluded : [])
+    .filter(i => Number.isInteger(i) && i >= 0 && i < triCount);
+  excludedFaces = new Set(valid);
+  precisionExcludedFaces = new Set(); // precision rebuilds from this on demand
+  refreshExclusionOverlay();
+}
+
+function _downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+// ── Import ───────────────────────────────────────────────────────────────────
+
+importProjectInput.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  importProjectInput.value = ''; // reset so the same file can be re-imported
+  try { await importProject(file); }
+  catch (err) { alert(t('alerts.importFailed', { msg: err.message })); }
+});
+
+async function importProject(file) {
+  if (file.size > PROJECT_MAX_IMPORT) {
+    throw new Error(`File too large (${(file.size / 1024 / 1024).toFixed(1)} MB, max 500 MB)`);
+  }
+  _undoApplyDepth++;
+  try {
+  const buf = await file.arrayBuffer();
+  const unzipped = unzipSync(new Uint8Array(buf));
+
+  const settingsBytes = unzipped['settings.json'];
+  const data = settingsBytes ? JSON.parse(strFromU8(settingsBytes)) : null;
+
+  // 1) Load model first — handleModelFile resets scaleU/scaleV/offsets/refineLength
+  //    AND clears any existing paint mask, so applied settings + restored mask
+  //    below will correctly override those resets.
+  const hasModel = !!unzipped['model.stl'];
+  if (hasModel) {
+    const stlFile = new File([unzipped['model.stl']], 'model.stl', { type: 'application/octet-stream' });
+    await handleModelFile(stlFile);
+  }
+
+  // 2) Apply settings after any model reset.
+  if (data) applySettingsSnapshot(data);
+
+  // 2b) Restore paint mask — only meaningful when the project shipped a model,
+  //     since indices reference that exact triangle set.
+  if (hasModel && unzipped['mask.json']) {
+    try {
+      const mask = JSON.parse(strFromU8(unzipped['mask.json']));
+      _restoreMask(mask);
+    } catch (err) { console.warn('Could not restore paint mask:', err); }
+  }
+
+  // 3) Texture: custom PNG wins over named preset.
+  if (unzipped['texture.png']) {
+    const texName = (data && data.activeMapName) || 'imported-texture.png';
+    const texFile = new File([unzipped['texture.png']], texName, { type: 'image/png' });
+    activeMapEntry = await loadCustomTexture(texFile);
+    activeMapEntry.isCustom = true;
+    activeMapEntry.name = texName;
+    _lastCustomMap = activeMapEntry;
+    activeMapName.textContent = texName;
+    document.querySelectorAll('.preset-swatch').forEach(s => s.classList.remove('active'));
+    _showCustomMapThumb(activeMapEntry);
+    customMapSwatch.classList.add('active');
+    updatePreview();
+  } else if (data && data.activeMapName) {
+    _selectPresetByName(data.activeMapName);
+  }
+
+  _autoSaveSettings();
+  } finally {
+    _undoApplyDepth--;
+    // Imported project = fresh start; mask indices belong to the imported model.
+    _clearUndoStacks();
+  }
+}
+
+// ── Undo / Redo ──────────────────────────────────────────────────────────────
+// Snapshot stack over the same state the project save/load helpers handle:
+// `getSettingsSnapshot()` (PERSISTED_KEYS + activeMapName) and
+// `_collectCurrentMask()` (selectionMode + excluded face indices). Operations
+// are debounced so a slider drag collapses to one undo step.
+
+const UNDO_LIMIT = 50;
+const UNDO_DEBOUNCE_MS = 400;
+
+let _undoStack = [];
+let _redoStack = [];
+let _baselineSnapshot = null;     // last committed state — the "before" of the next push
+let _undoApplyDepth = 0;          // > 0 while applying — suppresses re-capture
+let _undoCaptureTimer = null;
+
+const undoBtn = document.getElementById('undo-btn');
+const redoBtn = document.getElementById('redo-btn');
+
+function _captureUndoSnapshot() {
+  return {
+    settings: getSettingsSnapshot(),
+    mask:     _collectCurrentMask(),
+  };
+}
+
+function _undoSnapshotsEqual(a, b) {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  for (const k of PERSISTED_KEYS) {
+    if (a.settings[k] !== b.settings[k]) return false;
+  }
+  if ((a.settings.activeMapName || null) !== (b.settings.activeMapName || null)) return false;
+  const ma = a.mask, mb = b.mask;
+  if (!ma && !mb) return true;
+  if (!ma || !mb) return false;
+  if (ma.selectionMode !== mb.selectionMode) return false;
+  if (ma.excluded.length !== mb.excluded.length) return false;
+  const sb = new Set(mb.excluded);
+  for (const v of ma.excluded) if (!sb.has(v)) return false;
+  return true;
+}
+
+function _commitUndoCapture() {
+  _undoCaptureTimer = null;
+  if (_undoApplyDepth > 0) return;
+  const next = _captureUndoSnapshot();
+  if (_baselineSnapshot && _undoSnapshotsEqual(_baselineSnapshot, next)) return;
+  if (_baselineSnapshot) {
+    _undoStack.push(_baselineSnapshot);
+    if (_undoStack.length > UNDO_LIMIT) _undoStack.shift();
+  }
+  _redoStack.length = 0;
+  _baselineSnapshot = next;
+  _updateUndoButtons();
+}
+
+function _scheduleUndoCapture() {
+  if (_undoApplyDepth > 0) return;
+  clearTimeout(_undoCaptureTimer);
+  _undoCaptureTimer = setTimeout(_commitUndoCapture, UNDO_DEBOUNCE_MS);
+}
+
+function _flushUndoCapture() {
+  if (_undoCaptureTimer) {
+    clearTimeout(_undoCaptureTimer);
+    _undoCaptureTimer = null;
+    _commitUndoCapture();
+  }
+}
+
+function _clearUndoStacks() {
+  _undoStack.length = 0;
+  _redoStack.length = 0;
+  if (_undoCaptureTimer) { clearTimeout(_undoCaptureTimer); _undoCaptureTimer = null; }
+  _baselineSnapshot = _captureUndoSnapshot();
+  _updateUndoButtons();
+}
+
+function _applyUndoSnapshot(snap) {
+  _undoApplyDepth++;
+  try {
+    applySettingsSnapshot(snap.settings);
+    _restoreMask(snap.mask);
+    if (snap.settings && snap.settings.activeMapName) {
+      _selectPresetByName(snap.settings.activeMapName);
+    }
+    updatePreview();
+    _autoSaveSettings();
+  } finally {
+    _undoApplyDepth--;
+  }
+}
+
+function _undo() {
+  _flushUndoCapture();
+  if (!_undoStack.length) return;
+  const prev = _undoStack.pop();
+  if (_baselineSnapshot) _redoStack.push(_baselineSnapshot);
+  _applyUndoSnapshot(prev);
+  _baselineSnapshot = prev;
+  _updateUndoButtons();
+}
+
+function _redo() {
+  _flushUndoCapture();
+  if (!_redoStack.length) return;
+  const next = _redoStack.pop();
+  if (_baselineSnapshot) _undoStack.push(_baselineSnapshot);
+  _applyUndoSnapshot(next);
+  _baselineSnapshot = next;
+  _updateUndoButtons();
+}
+
+function _updateUndoButtons() {
+  if (undoBtn) undoBtn.disabled = _undoStack.length === 0;
+  if (redoBtn) redoBtn.disabled = _redoStack.length === 0;
+}
+
+// Capture hooks — piggyback on the same input/change bubbling that drives
+// autosave (line 3834), plus a global pointerup so mask paint strokes (which
+// don't go through #settings-panel events) terminate into a snapshot.
+if (_settingsPanel) {
+  _settingsPanel.addEventListener('input',  _scheduleUndoCapture);
+  _settingsPanel.addEventListener('change', _scheduleUndoCapture);
+}
+lockScaleBtn.addEventListener('click', _scheduleUndoCapture);
+window.addEventListener('pointerup', _scheduleUndoCapture);
+
+// Buttons
+if (undoBtn) undoBtn.addEventListener('click', _undo);
+if (redoBtn) redoBtn.addEventListener('click', _redo);
+
+// Keyboard: Ctrl/Cmd+Z = undo, Ctrl/Cmd+Shift+Z (or Ctrl/Cmd+Y) = redo.
+// Skip when focus is in a text-entry control so the browser's native field
+// undo works there.
+window.addEventListener('keydown', (e) => {
+  const mod = e.ctrlKey || e.metaKey;
+  if (!mod) return;
+  const k = (e.key || '').toLowerCase();
+  if (k !== 'z' && k !== 'y') return;
+  const tgt = e.target;
+  if (tgt) {
+    if (tgt.isContentEditable) return;
+    if (tgt.tagName === 'TEXTAREA') return;
+    if (tgt.tagName === 'INPUT') {
+      const tt = (tgt.type || '').toLowerCase();
+      if (tt === 'text' || tt === 'number' || tt === 'search' ||
+          tt === 'tel'  || tt === 'email'  || tt === 'url'    ||
+          tt === 'password') return;
+    }
+  }
+  if (k === 'z' && !e.shiftKey) { e.preventDefault(); _undo(); }
+  else                          { e.preventDefault(); _redo(); }
+});
+
+// Restore last session's settings on startup, then take an initial baseline.
+_restoreSessionSettings();
+_baselineSnapshot = _captureUndoSnapshot();
+_updateUndoButtons();

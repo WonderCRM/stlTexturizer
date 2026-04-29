@@ -44,7 +44,11 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
   const aspectV = tmax / Math.max(imgHeight, 1);
   const settingsWithAspect = { ...settings, textureAspectU: aspectU, textureAspectV: aspectV };
 
-  const QUANT = 1e4;
+  // 10 µm vertex-dedup cells. Must match subdivision.js QUANTISE so the
+  // displacement pipeline sees the same vertex-uniqueness that subdivision
+  // produced — coarser cells (1e4) collapsed real fillet vertices on small
+  // models, creating needle artifacts and non-manifold edges.
+  const QUANT = 1e5;
 
   // ── WHY GAPS HAPPEN ───────────────────────────────────────────────────────
   // The mesh is non-indexed (unrolled): every triangle has its own copy of
@@ -63,14 +67,27 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
   // so printed edges remain sharp.
 
   // ── Vertex dedup pass: position → numeric ID via one-time string-map pass ─
+  // idPos{X,Y,Z} are only populated when boundary falloff is enabled, since
+  // they're only consumed by the falloff distance field. Pre-sized to `count`
+  // (upper bound on uniqueCount); read by ID, so extra tail slots stay unused.
+  const needIdPositions = (settings.boundaryFalloff ?? 0) > 0;
   const _dedupMap = new Map();
   let _nextId = 0;
   const vertexId = new Uint32Array(count);
+  const idPosX = needIdPositions ? new Float64Array(count) : null;
+  const idPosY = needIdPositions ? new Float64Array(count) : null;
+  const idPosZ = needIdPositions ? new Float64Array(count) : null;
   for (let i = 0; i < count; i++) {
     const x = posAttr.getX(i), y = posAttr.getY(i), z = posAttr.getZ(i);
     const key = `${Math.round(x * QUANT)}_${Math.round(y * QUANT)}_${Math.round(z * QUANT)}`;
     let id = _dedupMap.get(key);
-    if (id === undefined) { id = _nextId++; _dedupMap.set(key, id); }
+    if (id === undefined) {
+      id = _nextId++;
+      _dedupMap.set(key, id);
+      if (needIdPositions) {
+        idPosX[id] = x; idPosY[id] = y; idPosZ[id] = z;
+      }
+    }
     vertexId[i] = id;
   }
   const uniqueCount = _nextId;
@@ -175,10 +192,20 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
     }
   }
 
-  // Normalise each accumulated normal
+  // Normalise each accumulated normal — also remember the pre-normalisation
+  // magnitude relative to the total face area at that position. A ratio near
+  // 1 means all neighbouring face normals point the same way (the smooth
+  // normal is a reliable surface direction); near 0 means opposing normals
+  // cancelled out (knife-edge / thin plate). The cubic sampler uses the ratio
+  // to decide whether the smooth normal can drive blend weights or whether
+  // the per-face zoneArea fallback is needed.
+  const smoothNrmReliability = new Float64Array(uniqueCount);
   for (let id = 0; id < uniqueCount; id++) {
-    const len = Math.sqrt(smoothNrmX[id]*smoothNrmX[id] + smoothNrmY[id]*smoothNrmY[id] + smoothNrmZ[id]*smoothNrmZ[id]) || 1;
-    smoothNrmX[id] /= len; smoothNrmY[id] /= len; smoothNrmZ[id] /= len;
+    const len = Math.sqrt(smoothNrmX[id]*smoothNrmX[id] + smoothNrmY[id]*smoothNrmY[id] + smoothNrmZ[id]*smoothNrmZ[id]);
+    const tA  = maskedFracTotal[id];
+    smoothNrmReliability[id] = (len > 0 && tA > 0) ? len / tA : 0;
+    const inv = len > 0 ? 1 / len : 1;
+    smoothNrmX[id] *= inv; smoothNrmY[id] *= inv; smoothNrmZ[id] *= inv;
   }
 
   // ── Boundary falloff distance field ──────────────────────────────────────────
@@ -191,67 +218,73 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
   let falloffArr = null;
 
   if (boundaryFalloff > 0) {
-    // Build position lookup per unique vertex ID (first occurrence)
-    const idPosX = new Float64Array(uniqueCount);
-    const idPosY = new Float64Array(uniqueCount);
-    const idPosZ = new Float64Array(uniqueCount);
-    const idPosSeen = new Uint8Array(uniqueCount);
-    for (let i = 0; i < count; i++) {
-      const vid = vertexId[i];
-      if (!idPosSeen[vid]) {
-        idPosSeen[vid] = 1;
-        idPosX[vid] = posAttr.getX(i);
-        idPosY[vid] = posAttr.getY(i);
-        idPosZ[vid] = posAttr.getZ(i);
-      }
-    }
-
-    const boundaryPositions = []; // [[x, y, z], ...]
-
-    // Collect boundary positions: vertices where maskedFrac is between 0 and 1,
-    // or that sit on the user-exclusion seam.
+    // Collect boundary positions in a single pass, using upper-bound-sized
+    // Float64Arrays and subarray() views to avoid double-iteration over uniqueCount.
+    const bpXFull = new Float64Array(uniqueCount);
+    const bpYFull = new Float64Array(uniqueCount);
+    const bpZFull = new Float64Array(uniqueCount);
+    let bpCount = 0;
+    let gMinX = Infinity, gMinY = Infinity, gMinZ = Infinity;
+    let gMaxX = -Infinity, gMaxY = -Infinity, gMaxZ = -Infinity;
     for (let id = 0; id < uniqueCount; id++) {
       const mfTotal = maskedFracTotal[id];
       const maskedFrac = mfTotal > 0 ? maskedFracMasked[id] / mfTotal : 0;
       const isOnExclBoundary = excludedPos && excludedPos[id] === 1;
       if (isOnExclBoundary || (maskedFrac > 0 && maskedFrac < 1)) {
-        boundaryPositions.push([idPosX[id], idPosY[id], idPosZ[id]]);
+        const x = idPosX[id], y = idPosY[id], z = idPosZ[id];
+        bpXFull[bpCount] = x; bpYFull[bpCount] = y; bpZFull[bpCount] = z;
+        if (x < gMinX) gMinX = x; if (x > gMaxX) gMaxX = x;
+        if (y < gMinY) gMinY = y; if (y > gMaxY) gMaxY = y;
+        if (z < gMinZ) gMinZ = z; if (z > gMaxZ) gMaxZ = z;
+        bpCount++;
       }
     }
 
-    if (boundaryPositions.length > 0) {
-      // Build a spatial grid of boundary positions for fast nearest-neighbor lookup
-      let gMinX = Infinity, gMinY = Infinity, gMinZ = Infinity;
-      let gMaxX = -Infinity, gMaxY = -Infinity, gMaxZ = -Infinity;
-      for (const bp of boundaryPositions) {
-        if (bp[0] < gMinX) gMinX = bp[0]; if (bp[0] > gMaxX) gMaxX = bp[0];
-        if (bp[1] < gMinY) gMinY = bp[1]; if (bp[1] > gMaxY) gMaxY = bp[1];
-        if (bp[2] < gMinZ) gMinZ = bp[2]; if (bp[2] > gMaxZ) gMaxZ = bp[2];
-      }
+    if (bpCount > 0) {
+      const bpX = bpXFull.subarray(0, bpCount);
+      const bpY = bpYFull.subarray(0, bpCount);
+      const bpZ = bpZFull.subarray(0, bpCount);
+
       const gPad = boundaryFalloff + 1e-3;
       gMinX -= gPad; gMinY -= gPad; gMinZ -= gPad;
       gMaxX += gPad; gMaxY += gPad; gMaxZ += gPad;
 
-      const gRes = Math.max(4, Math.min(128, Math.ceil(Math.cbrt(boundaryPositions.length) * 2)));
+      const gRes = Math.max(4, Math.min(128, Math.ceil(Math.cbrt(bpCount) * 2)));
       const gDx = (gMaxX - gMinX) / gRes || 1;
       const gDy = (gMaxY - gMinY) / gRes || 1;
       const gDz = (gMaxZ - gMinZ) / gRes || 1;
-      const bGrid = new Map();
-      const bCellKey = (ix, iy, iz) => (ix * gRes + iy) * gRes + iz;
+      const invDx = 1 / gDx, invDy = 1 / gDy, invDz = 1 / gDz;
+      const gridSize = gRes * gRes * gRes;
+      const gResMax = gRes - 1;
 
-      for (const bp of boundaryPositions) {
-        const ix = Math.max(0, Math.min(gRes - 1, Math.floor((bp[0] - gMinX) / gDx)));
-        const iy = Math.max(0, Math.min(gRes - 1, Math.floor((bp[1] - gMinY) / gDy)));
-        const iz = Math.max(0, Math.min(gRes - 1, Math.floor((bp[2] - gMinZ) / gDz)));
-        const ck = bCellKey(ix, iy, iz);
-        const cell = bGrid.get(ck);
-        if (cell) cell.push(bp); else bGrid.set(ck, [bp]);
+      // CSR-style spatial grid: cellStart/cellIdx give each cell a contiguous
+      // slice of boundary indices. Replaces per-cell JS arrays with flat typed
+      // arrays — no per-cell allocations, tight inner loop, better prefetching.
+      const cellCount = new Uint32Array(gridSize);
+      const bpCell = new Uint32Array(bpCount);
+      for (let i = 0; i < bpCount; i++) {
+        let ix = (bpX[i] - gMinX) * invDx | 0; if (ix < 0) ix = 0; else if (ix > gResMax) ix = gResMax;
+        let iy = (bpY[i] - gMinY) * invDy | 0; if (iy < 0) iy = 0; else if (iy > gResMax) iy = gResMax;
+        let iz = (bpZ[i] - gMinZ) * invDz | 0; if (iz < 0) iz = 0; else if (iz > gResMax) iz = gResMax;
+        const ck = (ix * gRes + iy) * gRes + iz;
+        bpCell[i] = ck;
+        cellCount[ck]++;
+      }
+      const cellStart = new Uint32Array(gridSize + 1);
+      for (let c = 0; c < gridSize; c++) cellStart[c + 1] = cellStart[c] + cellCount[c];
+      const cursor = new Uint32Array(gridSize);
+      const cellIdx = new Uint32Array(bpCount);
+      for (let i = 0; i < bpCount; i++) {
+        const ck = bpCell[i];
+        cellIdx[cellStart[ck] + cursor[ck]++] = i;
       }
 
       // How many grid cells to search in each direction to cover boundaryFalloff distance
-      const searchX = Math.ceil(boundaryFalloff / gDx);
-      const searchY = Math.ceil(boundaryFalloff / gDy);
-      const searchZ = Math.ceil(boundaryFalloff / gDz);
+      const searchX = Math.ceil(boundaryFalloff * invDx);
+      const searchY = Math.ceil(boundaryFalloff * invDy);
+      const searchZ = Math.ceil(boundaryFalloff * invDz);
+      const maxDist2 = boundaryFalloff * boundaryFalloff;
+      const invFalloff = 1 / boundaryFalloff;
 
       falloffArr = new Float64Array(uniqueCount);
       falloffArr.fill(1); // default: full displacement
@@ -263,33 +296,34 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
         if (maskedFrac > 0 || isOnExclBoundary) continue;
 
         const px = idPosX[id], py = idPosY[id], pz = idPosZ[id];
-        const cix = Math.max(0, Math.min(gRes - 1, Math.floor((px - gMinX) / gDx)));
-        const ciy = Math.max(0, Math.min(gRes - 1, Math.floor((py - gMinY) / gDy)));
-        const ciz = Math.max(0, Math.min(gRes - 1, Math.floor((pz - gMinZ) / gDz)));
+        let cix = (px - gMinX) * invDx | 0; if (cix < 0) cix = 0; else if (cix > gResMax) cix = gResMax;
+        let ciy = (py - gMinY) * invDy | 0; if (ciy < 0) ciy = 0; else if (ciy > gResMax) ciy = gResMax;
+        let ciz = (pz - gMinZ) * invDz | 0; if (ciz < 0) ciz = 0; else if (ciz > gResMax) ciz = gResMax;
 
-        let minDist2 = boundaryFalloff * boundaryFalloff;
-        for (let dix = -searchX; dix <= searchX; dix++) {
-          const nix = cix + dix;
-          if (nix < 0 || nix >= gRes) continue;
-          for (let diy = -searchY; diy <= searchY; diy++) {
-            const niy = ciy + diy;
-            if (niy < 0 || niy >= gRes) continue;
-            for (let diz = -searchZ; diz <= searchZ; diz++) {
-              const niz = ciz + diz;
-              if (niz < 0 || niz >= gRes) continue;
-              const cell = bGrid.get(bCellKey(nix, niy, niz));
-              if (!cell) continue;
-              for (const bp of cell) {
-                const dx = px - bp[0], dy = py - bp[1], dz = pz - bp[2];
+        const nixLo = Math.max(0, cix - searchX), nixHi = Math.min(gResMax, cix + searchX);
+        const niyLo = Math.max(0, ciy - searchY), niyHi = Math.min(gResMax, ciy + searchY);
+        const nizLo = Math.max(0, ciz - searchZ), nizHi = Math.min(gResMax, ciz + searchZ);
+
+        let minDist2 = maxDist2;
+        for (let nix = nixLo; nix <= nixHi; nix++) {
+          const baseX = nix * gRes;
+          for (let niy = niyLo; niy <= niyHi; niy++) {
+            const baseXY = (baseX + niy) * gRes;
+            for (let niz = nizLo; niz <= nizHi; niz++) {
+              const ck = baseXY + niz;
+              const end = cellStart[ck + 1];
+              for (let k = cellStart[ck]; k < end; k++) {
+                const idx = cellIdx[k];
+                const dx = px - bpX[idx], dy = py - bpY[idx], dz = pz - bpZ[idx];
                 const d2 = dx * dx + dy * dy + dz * dz;
                 if (d2 < minDist2) minDist2 = d2;
               }
             }
           }
         }
-        const dist = Math.sqrt(minDist2);
-        const factor = Math.min(1, dist / boundaryFalloff);
-        falloffArr[id] = factor;
+        if (minDist2 < maxDist2) {
+          falloffArr[id] = Math.sqrt(minDist2) * invFalloff;
+        }
       }
     }
   }
@@ -303,43 +337,57 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
 
     tmpPos.fromBufferAttribute(posAttr, i);
 
-    // Cubic: zone-area-weighted sampling with a stable per-face dominant axis.
-    // Non-seam vertices use their single zone purely; seam-edge vertices that
-    // adjoin two zones get a face-area-proportional blend.  This guarantees all
-    // three vertices of every triangle receive consistent displacement, making
-    // the mesh watertight with no mixed-projection artefact rows at the seam.
+    // Cubic: derive blend weights from the *smooth* per-vertex normal so that
+    // adjacent vertices on a curved region (small fillets, rolled edges) see
+    // smoothly varying weights — this matches the per-fragment behaviour of
+    // the preview shader. The previous implementation summed per-face zone
+    // weights into per-vertex zoneArea[X|Y|Z]; on small fillets those sums
+    // change abruptly between neighbours because each face's dominant-axis
+    // membership is binary, which produced jagged "needle" displacement.
     //
-    // Always use this path regardless of mappingBlend.  The smooth normals from
-    // subdivision can be wrong on thin structures (e.g. a flat base plate) where
-    // top (0,0,1) and bottom (0,0,-1) face normals cancel at shared edge vertices,
-    // leaving a horizontal smooth normal.  computeUV would then pick the wrong
-    // cubic projection axis, making those faces appear untextured.  The face-
-    // normal-based zoneArea arrays are immune to this because they classify faces
-    // by their geometric cross-product normal, not the averaged vertex normal.
+    // The thin-plate edge case (top + bottom face normals cancel at a shared
+    // knife-edge vertex, leaving the smooth normal nearly zero) still needs
+    // the per-face zoneArea path. We detect that via smoothNrmReliability —
+    // length(rawSmoothNormal) / totalFaceArea, in [0, 1]. Surfaces with all
+    // normals broadly aligned read ≈1; perfectly cancelling pairs read 0.
+    // 0.5 is loose enough that a 90° cube edge (≈0.71) still uses the smooth
+    // path, but a near-180° fold falls back to face-area zones.
     if (settings.mappingMode === 6 /* MODE_CUBIC */) {
-      const zaX = zoneAreaX[vid], zaY = zoneAreaY[vid], zaZ = zoneAreaZ[vid];
-      const total = zaX + zaY + zaZ;
-      if (total > 0) {
-        const md = Math.max(bounds.size.x, bounds.size.y, bounds.size.z, 1e-6);
-        const rotRad = (settings.rotation ?? 0) * Math.PI / 180;
+      const md = Math.max(bounds.size.x, bounds.size.y, bounds.size.z, 1e-6);
+      const rotRad = (settings.rotation ?? 0) * Math.PI / 180;
+      const cubicBlend = settings.mappingBlend ?? 0;
+      const cubicBandWidth = settings.seamBandWidth ?? 0.35;
+
+      let wX = 0, wY = 0, wZ = 0;
+      if (smoothNrmReliability[vid] > 0.5) {
+        const sn = { x: smoothNrmX[vid], y: smoothNrmY[vid], z: smoothNrmZ[vid] };
+        const w = getCubicBlendWeights(sn, cubicBlend, cubicBandWidth);
+        wX = w.x; wY = w.y; wZ = w.z;
+      } else {
+        const zaX = zoneAreaX[vid], zaY = zoneAreaY[vid], zaZ = zoneAreaZ[vid];
+        const total = zaX + zaY + zaZ;
+        if (total > 0) { wX = zaX/total; wY = zaY/total; wZ = zaZ/total; }
+      }
+
+      if (wX + wY + wZ > 0) {
         let grey = 0;
-        if (zaX > 0) { // X-dominant zone → YZ projection
+        if (wX > 0) { // X-dominant → YZ projection
           let rawU = (tmpPos.y-bounds.min.y)/md;
-          if (smoothNrmX[vid] < 0) rawU = -rawU; // flip U for -X faces
+          if (smoothNrmX[vid] < 0) rawU = -rawU;
           const uv = _cubicUV(rawU, (tmpPos.z-bounds.min.z)/md, settings, rotRad, aspectU, aspectV);
-          grey += sampleBilinear(imageData.data, imgWidth, imgHeight, uv.u, uv.v) * (zaX/total);
+          grey += sampleBilinear(imageData.data, imgWidth, imgHeight, uv.u, uv.v) * wX;
         }
-        if (zaY > 0) { // Y-dominant zone → XZ projection
+        if (wY > 0) { // Y-dominant → XZ projection
           let rawU = (tmpPos.x-bounds.min.x)/md;
-          if (smoothNrmY[vid] > 0) rawU = -rawU; // flip U for +Y faces
+          if (smoothNrmY[vid] > 0) rawU = -rawU;
           const uv = _cubicUV(rawU, (tmpPos.z-bounds.min.z)/md, settings, rotRad, aspectU, aspectV);
-          grey += sampleBilinear(imageData.data, imgWidth, imgHeight, uv.u, uv.v) * (zaY/total);
+          grey += sampleBilinear(imageData.data, imgWidth, imgHeight, uv.u, uv.v) * wY;
         }
-        if (zaZ > 0) { // Z-dominant zone → XY projection
+        if (wZ > 0) { // Z-dominant → XY projection
           let rawU = (tmpPos.x-bounds.min.x)/md;
-          if (smoothNrmZ[vid] < 0) rawU = -rawU; // flip U for -Z faces
+          if (smoothNrmZ[vid] < 0) rawU = -rawU;
           const uv = _cubicUV(rawU, (tmpPos.y-bounds.min.y)/md, settings, rotRad, aspectU, aspectV);
-          grey += sampleBilinear(imageData.data, imgWidth, imgHeight, uv.u, uv.v) * (zaZ/total);
+          grey += sampleBilinear(imageData.data, imgWidth, imgHeight, uv.u, uv.v) * wZ;
         }
         dispCacheVal[vid] = grey;
         continue;
@@ -397,6 +445,24 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
     if (maskedFrac > 0) {
       if (settings.bottomAngleLimit > 0 && newZ < tmpPos.z) newZ = tmpPos.z;
       if (settings.topAngleLimit    > 0 && newZ > tmpPos.z) newZ = tmpPos.z;
+    }
+
+    // Overhang protection: never move a vertex below its original Z. X/Y
+    // displacement is preserved so surface texture detail still appears,
+    // it just gets pushed sideways instead of creating a new overhang.
+    if (settings.noDownwardZ && newZ < tmpPos.z) newZ = tmpPos.z;
+
+    // Bottom-plane flat clamp: with overhang protection on, also clamp
+    // upward motion when the original vertex sat on the print bottom plane.
+    // Without this, a downward-facing face (smoothNrm ≈ (0,0,-1)) pulls UP
+    // when the texture sample is below mid-grey (centeredGrey < 0 makes
+    // smoothNrm × disp positive in Z), so adjacent bottom-face vertices
+    // end up at slightly different heights and slicers render the now-
+    // tilted triangles with visibly varying shading. The clamp keeps the
+    // bed-contact surface a single Z value while leaving any vertex above
+    // the bottom plane (side fillets, etc.) free to follow texture detail.
+    if (settings.noDownwardZ && tmpPos.z <= bounds.min.z + 1e-5) {
+      newZ = tmpPos.z;
     }
 
     newPos[i*3]   = newX;

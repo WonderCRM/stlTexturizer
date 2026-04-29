@@ -10,6 +10,10 @@ Load an STL, OBJ, or 3MF file, pick a texture, tune the parameters, and export a
 
 ## Recent Updates
 
+- Save / load project files (`.bumpmesh`)
+- Undo / redo history
+- Part rotation gizmo
+- Mesh diagnostics
 - Smooth masking borders
 - New languages: Italian, Spanish, Portuguese, Japanese, French
 - 2–3× speed improvement
@@ -56,6 +60,7 @@ Load an STL, OBJ, or 3MF file, pick a texture, tune the parameters, and export a
 ### Mesh Processing
 - **Adaptive subdivision** — subdivides edges until they are ≤ a target length; respects sharp creases (>30° dihedral)
 - **QEM decimation** — simplifies the result to a target triangle count using Quadric Error Metrics with boundary protection, link-condition checks, normal-flip rejection, and crease preservation
+- **Mesh diagnostics** — automatic checks for open edges and shell count, with advanced diagnostics and overlay highlights for problem areas
 - **Safety cap** — hard limit of 10 M triangles during subdivision to prevent out-of-memory
 
 ### 3D Viewer

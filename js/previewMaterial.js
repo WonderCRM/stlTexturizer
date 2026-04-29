@@ -31,12 +31,15 @@ const sharedGLSL = /* glsl */`
   uniform vec3      boundsMin;
   uniform vec3      boundsSize;
   uniform vec3      boundsCenter;
+  uniform vec2      cylinderCenter;
+  uniform float     cylinderRadius;
   uniform float     bottomAngleLimit;
   uniform float     topAngleLimit;
   uniform float     mappingBlend;
   uniform float     seamBandWidth;
   uniform float     capAngle;
   uniform int       symmetricDisplacement;
+  uniform int       noDownwardZ;
   uniform int       useDisplacement;
   uniform vec2      textureAspect;
 
@@ -59,7 +62,11 @@ const sharedGLSL = /* glsl */`
                     : axis == 1 ? max(absN.x, absN.z)
                                 : max(absN.x, absN.y);
 
-    if (mappingBlend < 0.001 || primary - secondary <= CUBIC_AXIS_EPSILON) {
+    // blend=0: hard one-hot for sharp seams. Do NOT also short-circuit at
+    // primary≈secondary when blend>0 — the smooth branch produces 0.5/0.5
+    // there, and short-circuiting to one-hot creates a single-fragment spike
+    // wherever a fillet's smooth normal lands exactly on the 45° tie.
+    if (mappingBlend < 0.001) {
       if (axis == 0) return vec3(1.0, 0.0, 0.0);
       if (axis == 1) return vec3(0.0, 1.0, 0.0);
       return vec3(0.0, 0.0, 1.0);
@@ -110,9 +117,12 @@ const sharedGLSL = /* glsl */`
       return sampleMap(vec2((pos.y - boundsMin.y) / md, (pos.z - boundsMin.z) / md));
 
     } else if (mappingMode == 3) {
-      float r = max(boundsSize.x, boundsSize.y) * 0.5;
-      float C = TWO_PI * max(r, 1e-4);
-      float u_cyl = atan(rel.y, rel.x) / TWO_PI + 0.5;
+      // Cylinder axis is +Z. Center XY and radius are user-controllable so
+      // pie-slice / off-center parts can be projected without distortion.
+      vec2 cylRel2 = pos.xy - cylinderCenter;
+      float r = max(cylinderRadius, 1e-4);
+      float C = TWO_PI * r;
+      float u_cyl = atan(cylRel2.y, cylRel2.x) / TWO_PI + 0.5;
       float v_cyl = (pos.z - boundsMin.z) / C;
 
       // Seam smoothing: cross-fade between left-side and right-side texture
@@ -135,7 +145,7 @@ const sharedGLSL = /* glsl */`
       float capThreshold = cos(radians(capAngle));
       float blendHalf = seamBandWidth * 0.5;
       float capW = smoothstep(capThreshold - blendHalf, capThreshold + blendHalf, abs(blendN.z));
-      float hCap  = sampleMap(vec2(rel.x / C + 0.5, rel.y / C + 0.5));
+      float hCap  = sampleMap(vec2(cylRel2.x / C + 0.5, cylRel2.y / C + 0.5));
       return mix(hSide, hCap, capW);
 
     } else if (mappingMode == 4) {
@@ -242,6 +252,8 @@ const vertexShader = /* glsl */`
       // arrive at the same point (watertight, no cracks).
       vec3 sN = length(smoothNormal) > 1e-6 ? normalize(smoothNormal) : safeN;
       pos = position + sN * h * amplitude;
+      // Overhang protection: never move a vertex below its original Z.
+      if (noDownwardZ == 1 && pos.z < position.z) pos.z = position.z;
     }
 
     // Always pass the ORIGINAL position for UV computation in the fragment shader.
@@ -425,6 +437,12 @@ export function updateMaterial(material, displacementTexture, settings) {
     u.boundsMin.value.copy(settings.bounds.min);
     u.boundsSize.value.copy(settings.bounds.size);
     u.boundsCenter.value.copy(settings.bounds.center);
+    const cx = settings.cylinderCenterX ?? settings.bounds.center.x;
+    const cy = settings.cylinderCenterY ?? settings.bounds.center.y;
+    const cr = settings.cylinderRadius
+      ?? Math.max(settings.bounds.size.x, settings.bounds.size.y) * 0.5;
+    u.cylinderCenter.value.set(cx, cy);
+    u.cylinderRadius.value = cr;
   }
   u.bottomAngleLimit.value = settings.bottomAngleLimit ?? 5.0;
   u.topAngleLimit.value    = settings.topAngleLimit    ?? 0.0;
@@ -432,6 +450,7 @@ export function updateMaterial(material, displacementTexture, settings) {
   u.seamBandWidth.value           = settings.seamBandWidth           ?? 0.35;
   u.capAngle.value                = settings.capAngle                ?? 20.0;
   u.symmetricDisplacement.value   = settings.symmetricDisplacement   ? 1 : 0;
+  u.noDownwardZ.value             = settings.noDownwardZ             ? 1 : 0;
   u.useDisplacement.value         = settings.useDisplacement         ? 1 : 0;
   u.textureAspect.value.set(settings.textureAspectU ?? 1, settings.textureAspectV ?? 1);
   u.boundaryFalloffDist.value       = settings.boundaryFalloff           ?? 0.0;
@@ -455,12 +474,18 @@ function buildUniforms(tex, settings) {
     boundsMin:        { value: b.min.clone() },
     boundsSize:       { value: b.size.clone() },
     boundsCenter:     { value: b.center.clone() },
+    cylinderCenter:   { value: new THREE.Vector2(
+                          settings.cylinderCenterX ?? b.center.x,
+                          settings.cylinderCenterY ?? b.center.y) },
+    cylinderRadius:   { value: settings.cylinderRadius
+                          ?? Math.max(b.size.x, b.size.y) * 0.5 },
     bottomAngleLimit: { value: settings.bottomAngleLimit ?? 5.0 },
     topAngleLimit:    { value: settings.topAngleLimit    ?? 0.0 },
     mappingBlend:             { value: settings.mappingBlend            ?? 0.0 },
     seamBandWidth:            { value: settings.seamBandWidth            ?? 0.35 },
     capAngle:                 { value: settings.capAngle                 ?? 20.0 },
     symmetricDisplacement:    { value: settings.symmetricDisplacement   ? 1 : 0 },
+    noDownwardZ:              { value: settings.noDownwardZ             ? 1 : 0 },
     useDisplacement:          { value: settings.useDisplacement         ? 1 : 0 },
     textureAspect:            { value: new THREE.Vector2(settings.textureAspectU ?? 1, settings.textureAspectV ?? 1) },
     boundaryEdgeTex:          { value: createFallbackDataTexture() },

@@ -27,16 +27,6 @@ export function getDominantCubicAxis(normal) {
   return 'z';
 }
 
-export function isAmbiguousCubicNormal(normal) {
-  const ax = Math.abs(normal.x);
-  const ay = Math.abs(normal.y);
-  const az = Math.abs(normal.z);
-  const axis = getDominantCubicAxis(normal);
-  const primary = axis === 'x' ? ax : axis === 'y' ? ay : az;
-  const secondary = axis === 'x' ? Math.max(ay, az) : axis === 'y' ? Math.max(ax, az) : Math.max(ax, ay);
-  return primary - secondary <= CUBIC_AXIS_EPSILON;
-}
-
 export function getCubicBlendWeights(normal, blend, seamBandWidth = 0.35) {
   const axis = getDominantCubicAxis(normal);
   const ax = Math.abs(normal.x);
@@ -45,7 +35,12 @@ export function getCubicBlendWeights(normal, blend, seamBandWidth = 0.35) {
   const primary = axis === 'x' ? ax : axis === 'y' ? ay : az;
   const secondary = axis === 'x' ? Math.max(ay, az) : axis === 'y' ? Math.max(ax, az) : Math.max(ax, ay);
 
-  if (blend <= 0.001 || isAmbiguousCubicNormal(normal)) {
+  // blend=0: hard one-hot for sharp seams. Do NOT also short-circuit at the
+  // primary≈secondary tie when blend>0 — the smooth weight branch handles
+  // an exact 45° normal correctly (it produces 0.5/0.5), and short-circuiting
+  // to one-hot there creates a single-vertex spike on fillets where the
+  // smooth normal sweeps continuously across the cube-face boundary.
+  if (blend <= 0.001) {
     return {
       x: axis === 'x' ? 1 : 0,
       y: axis === 'y' ? 1 : 0,
@@ -142,10 +137,14 @@ export function computeUV(pos, normal, mode, settings, bounds) {
     case MODE_CYLINDRICAL: {
       // mappingBlend=0 → pure side projection for all faces (original behaviour, no cap seam).
       // mappingBlend>0 → smooth side↔cap blend.
-      const r  = Math.max(size.x, size.y) * 0.5;
-      const C  = TWO_PI * Math.max(r, 1e-6);
-      const rx = pos.x - center.x;
-      const ry = pos.y - center.y;
+      // Cylinder axis is +Z. Center XY and radius default to the AABB but can
+      // be overridden so partial cylinders (pie slices) project undistorted.
+      const cx = settings.cylinderCenterX ?? center.x;
+      const cy = settings.cylinderCenterY ?? center.y;
+      const r  = Math.max(settings.cylinderRadius ?? Math.max(size.x, size.y) * 0.5, 1e-6);
+      const C  = TWO_PI * r;
+      const rx = pos.x - cx;
+      const ry = pos.y - cy;
       const blend = settings.mappingBlend ?? 0.0;
       const theta = Math.atan2(ry, rx);
       const uRaw = (theta / TWO_PI) + 0.5;

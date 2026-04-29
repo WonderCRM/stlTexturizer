@@ -23,8 +23,10 @@ const quantKey = (x, y, z) =>
  *
  * @param {THREE.BufferGeometry} geometry  – non-indexed
  * @returns {{
- *   adjacency: Array<Array<{neighbor:number, angle:number}>>,
- *   centroids: Float32Array   (triCount × 3, world-space centroid per triangle)
+ *   adjacency:   Array<Array<{neighbor:number, angle:number}>>,
+ *   centroids:   Float32Array   (triCount × 3, geometry-local centroid per triangle),
+ *   boundRadii:  Float32Array   (triCount, max vertex-to-centroid distance per triangle),
+ *   faceNormals: Float32Array   (triCount × 3, geometry-local unit face normal per triangle)
  * }}
  */
 export function buildAdjacency(geometry) {
@@ -118,7 +120,7 @@ export function buildAdjacency(geometry) {
     adjacency[b].push({ neighbor: a, angle: angleDeg });
   }
 
-  return { adjacency, centroids, boundRadii, openEdgeCount, nonManifoldEdgeCount };
+  return { adjacency, centroids, boundRadii, faceNormals, openEdgeCount, nonManifoldEdgeCount };
 }
 
 // ── Bucket fill ───────────────────────────────────────────────────────────────
