@@ -677,6 +677,30 @@ main {
   background: var(--accent); border: none; cursor: grab;
 }
 
+/* Resolution slider runs coarse → fine left-to-right, so the mm value (where
+   smaller = finer) decreases as you drag right. The coarse/fine captions below
+   carry the direction; the descending number is intentional. */
+.slider-stack {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.slider-stack input[type="range"] {
+  flex: 0 0 auto;
+  width: 100%;
+}
+/* Resolution only: min (0.01 mm, fine) on the right, max (2 mm, coarse) on the left. */
+#refine-length { direction: rtl; }
+.slider-captions {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--text-muted, #888);
+  line-height: 1;
+}
+
 .val {
   flex: 0 0 52px;
   text-align: right;
