@@ -1540,10 +1540,12 @@ function wireEvents() {
 
   // ── Export ──
   const startExport = (format) => {
-    if (sessionStorage.getItem('stlt-no-sponsor') === '1') {
-      handleExport(format);
-      return;
-    }
+    // Start the export immediately — the pipeline runs in the worker, so the
+    // sponsor overlay sits on top of a live progress bar instead of delaying
+    // the work until it's dismissed.
+    handleExport(format);
+
+    if (sessionStorage.getItem('stlt-no-sponsor') === '1') return;
     const overlay = document.getElementById('sponsor-overlay');
     const closeBtn = document.getElementById('sponsor-close');
     const storeLink = overlay.querySelector('.sponsor-link');
@@ -1555,11 +1557,9 @@ function wireEvents() {
         sessionStorage.setItem('stlt-no-sponsor', '1');
       }
       overlay.classList.add('hidden');
-      handleExport(format);
     };
 
     closeBtn.onclick = dismiss;
-    // Also start processing when the user clicks through to the store
     storeLink.onclick = () => setTimeout(dismiss, 150);
   };
   exportBtn.addEventListener('click', () => startExport('stl'));
@@ -4592,6 +4592,39 @@ function _onBakePipelineEvent(stage, p, info) {
 
 let _pipelineWorker = null;
 let _pipelineWorkerFailed = false; // hard init failure → stop retrying
+let _pipelineWorkerInit = null;    // in-flight init promise (warmup + export may race)
+
+// Resolve the cached worker, initialising it at most once. Returns null when
+// the worker can't run here (the caller then uses the inline pipeline).
+function ensurePipelineWorker() {
+  if (_pipelineWorkerFailed) return Promise.resolve(null);
+  if (_pipelineWorker) return Promise.resolve(_pipelineWorker);
+  if (!_pipelineWorkerInit) {
+    _pipelineWorkerInit = _initPipelineWorker().then(
+      (w) => { _pipelineWorker = w; _pipelineWorkerInit = null; return w; },
+      (err) => {
+        _pipelineWorkerFailed = true;
+        _pipelineWorkerInit = null;
+        console.warn('[stlTexturizer] export worker unavailable — running pipeline on the main thread:', err.message);
+        return null;
+      }
+    );
+  }
+  return _pipelineWorkerInit;
+}
+
+// Warm the worker up during idle time after load: the worker boot includes
+// fetching three.js (workers ignore the page import map), and doing that now
+// keeps it off the first export's critical path.
+{
+  const warm = () => { ensurePipelineWorker(); };
+  const schedule = () => {
+    if ('requestIdleCallback' in window) requestIdleCallback(warm, { timeout: 8000 });
+    else setTimeout(warm, 3000);
+  };
+  if (document.readyState === 'complete') schedule();
+  else window.addEventListener('load', schedule, { once: true });
+}
 
 function _initPipelineWorker() {
   return new Promise((resolve, reject) => {
@@ -4620,19 +4653,11 @@ async function runPipeline(input, onEvent, isStale) {
   // Prefer the worker. Fall back to inline ONLY on init failure — a pipeline
   // error inside the worker (e.g. OOM) must propagate to the caller's alert,
   // not silently re-run the same doomed job on the main thread.
-  if (!_pipelineWorkerFailed && !_pipelineWorker) {
-    try {
-      _pipelineWorker = await _initPipelineWorker();
-    } catch (err) {
-      _pipelineWorkerFailed = true;
-      console.warn('[stlTexturizer] export worker unavailable — running pipeline on the main thread:', err.message);
-    }
-  }
+  const w = await ensurePipelineWorker();
   if (isStale()) return null;
-  if (!_pipelineWorker) {
+  if (!w) {
     return runExportPipeline(input, onEvent, isStale);
   }
-  const w = _pipelineWorker;
   return new Promise((resolve, reject) => {
     const cleanup = () => { w.onmessage = null; w.onerror = null; };
     const kill = () => { cleanup(); try { w.terminate(); } catch {} _pipelineWorker = null; };
