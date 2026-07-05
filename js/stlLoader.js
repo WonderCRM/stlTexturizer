@@ -24,9 +24,9 @@ export function loadSTLFile(file) {
     reader.onload = (e) => {
       try {
         const geometry = stlLoader.parse(e.target.result);
-        const { nanCount, degenerateCount } = setupGeometry(geometry);
+        const { nanCount, degenerateCount, originOffset } = setupGeometry(geometry);
         const bounds = computeBounds(geometry);
-        resolve({ geometry, bounds, nanCount, degenerateCount });
+        resolve({ geometry, bounds, nanCount, degenerateCount, originOffset });
       } catch (err) {
         reject(err);
       }
@@ -103,7 +103,11 @@ function validateAndCleanGeometry(geometry) {
 
 /**
  * Validate, centre, and compute normals for a freshly parsed geometry.
- * Returns { nanCount, degenerateCount } removed-triangle counts for caller warnings.
+ * Returns { nanCount, degenerateCount, originOffset }: removed-triangle counts
+ * for caller warnings, plus the translation that was subtracted to centre the
+ * mesh. The app folds originOffset into its pose transform and undoes it on
+ * export so files keep their original world coordinates and stay aligned with
+ * sibling parts (issue #82).
  */
 function setupGeometry(geometry) {
   const { nanCount, degenerateCount } = validateAndCleanGeometry(geometry);
@@ -114,7 +118,7 @@ function setupGeometry(geometry) {
   geometry.translate(-centre.x, -centre.y, -centre.z);
   geometry.computeBoundingBox();
   if (!geometry.attributes.normal) geometry.computeVertexNormals();
-  return { nanCount, degenerateCount };
+  return { nanCount, degenerateCount, originOffset: centre };
 }
 
 /**
@@ -199,9 +203,9 @@ export function loadOBJFile(file) {
       try {
         const group = objLoader.parse(e.target.result);
         const geometry = mergeGroupGeometries(group);
-        const { nanCount, degenerateCount } = setupGeometry(geometry);
+        const { nanCount, degenerateCount, originOffset } = setupGeometry(geometry);
         const bounds = computeBounds(geometry);
-        resolve({ geometry, bounds, nanCount, degenerateCount });
+        resolve({ geometry, bounds, nanCount, degenerateCount, originOffset });
       } catch (err) {
         reject(err);
       }
@@ -229,9 +233,9 @@ export function load3MFFile(file) {
     reader.onload = (e) => {
       try {
         const geometry = parse3MF(new Uint8Array(e.target.result));
-        const { nanCount, degenerateCount } = setupGeometry(geometry);
+        const { nanCount, degenerateCount, originOffset } = setupGeometry(geometry);
         const bounds = computeBounds(geometry);
-        resolve({ geometry, bounds, nanCount, degenerateCount });
+        resolve({ geometry, bounds, nanCount, degenerateCount, originOffset });
       } catch (err) {
         reject(err);
       }

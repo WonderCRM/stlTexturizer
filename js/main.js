@@ -25,6 +25,15 @@ import { zipSync, unzipSync, strToU8, strFromU8 } from 'fflate';
 
 let currentGeometry   = null;   // original loaded geometry
 let currentBounds     = null;   // bounds of the original geometry
+// Forward rigid transform from the file's original coordinates to the in-app
+// (centered, possibly rotated) working space: mem = poseRot·orig + poseTrans.
+// Import centering, in-app rotation, and place-on-face all fold into it; the
+// full INVERSE is applied on export so files leave BumpMesh in their original
+// position AND orientation (issue #82) — in-app rotation is a texturing aid,
+// not part of the output.
+let currentPoseRot    = new THREE.Quaternion();
+let currentPoseTrans  = new THREE.Vector3();
+let _rotatePoseSnapshot = null; // { rot, trans } captured on rotate-mode entry, restored by the reset button alongside _rotateOriginalPositions
 let currentStlName    = 'model'; // base filename of the loaded STL (no extension)
 let currentStlExt     = '.stl';  // source file extension (.stl/.obj/.3mf), for the stats line
 let activeMapEntry    = null;   // { name, texture, imageData, width, height, isCustom? }
@@ -1486,9 +1495,13 @@ function wireEvents() {
   rotateResetBtn.addEventListener('click', () => {
     if (!currentGeometry || !_rotateOriginalPositions) return;
 
-    // Restore original vertex positions
+    // Restore original vertex positions and the matching pose transform
     currentGeometry.attributes.position.array.set(_rotateOriginalPositions);
     currentGeometry.attributes.position.needsUpdate = true;
+    if (_rotatePoseSnapshot) {
+      currentPoseRot.copy(_rotatePoseSnapshot.rot);
+      currentPoseTrans.copy(_rotatePoseSnapshot.trans);
+    }
     currentGeometry.computeVertexNormals();
     if (currentGeometry.attributes.faceNormal) {
       currentGeometry.deleteAttribute('faceNormal');
@@ -2268,11 +2281,16 @@ function handlePlaceOnFaceClick(e) {
     pos[i + 2] = v.z;
   }
 
+  // Fold the rotation into the pose transform (undone again on export).
+  currentPoseRot.premultiply(quat).normalize();
+  currentPoseTrans.applyQuaternion(quat);
+
   // Re-center geometry
   currentGeometry.computeBoundingBox();
   const center = new THREE.Vector3();
   currentGeometry.boundingBox.getCenter(center);
   currentGeometry.translate(-center.x, -center.y, -center.z);
+  currentPoseTrans.sub(center);
 
   // Recompute normals from scratch (fixes lighting + angle masking)
   currentGeometry.computeVertexNormals();
@@ -2382,9 +2400,10 @@ function toggleRotateMode(active) {
     if (placeOnFaceActive) togglePlaceOnFace(false);
     if (exclusionTool) setExclusionTool(null);
 
-    // Snapshot original positions for reset
+    // Snapshot original positions (and the matching pose transform) for reset
     if (currentGeometry) {
       _rotateOriginalPositions = new Float32Array(currentGeometry.attributes.position.array);
+      _rotatePoseSnapshot = { rot: currentPoseRot.clone(), trans: currentPoseTrans.clone() };
     }
     rotateAngles = { x: 0, y: 0, z: 0 };
     rotateXInput.value = '0'; rotateYInput.value = '0'; rotateZInput.value = '0';
@@ -2394,6 +2413,7 @@ function toggleRotateMode(active) {
   } else {
     setRotationGizmo(false);
     _rotateOriginalPositions = null;
+    _rotatePoseSnapshot = null;
 
     // Full rebuild now that rotation is done
     _rotateFinalize();
@@ -2465,6 +2485,10 @@ function _rotateGeometry(quat) {
     pos[i + 2] = v.z;
   }
 
+  // Fold the rotation into the pose transform (undone again on export).
+  currentPoseRot.premultiply(quat).normalize();
+  currentPoseTrans.applyQuaternion(quat);
+
   // Recompute normals
   currentGeometry.computeVertexNormals();
   if (currentGeometry.attributes.faceNormal) {
@@ -2484,12 +2508,13 @@ function _rotateGeometry(quat) {
 function _rotateFinalize() {
   if (!currentGeometry) return;
 
-  // Re-center
+  // Re-center, folding the shift into the pose transform (undone on export).
   currentGeometry.computeBoundingBox();
   const center = new THREE.Vector3();
   currentGeometry.boundingBox.getCenter(center);
   currentGeometry.translate(-center.x, -center.y, -center.z);
   currentGeometry.attributes.position.needsUpdate = true;
+  currentPoseTrans.sub(center);
 
   // Full refresh
   currentBounds = computeBounds(currentGeometry);
@@ -2796,6 +2821,8 @@ function loadDefaultCube() {
 
   currentGeometry = geo;
   currentBounds   = computeBounds(geo);
+  currentPoseRot   = new THREE.Quaternion(); // authored at the origin — nothing to restore
+  currentPoseTrans = new THREE.Vector3();
   currentStlName  = 'cube_50x50x50';
   currentStlExt   = '.stl';
   checkAmplitudeWarning();
@@ -2863,7 +2890,7 @@ function loadDefaultCube() {
 async function handleModelFile(file) {
   _undoApplyDepth++;
   try {
-    const { geometry, bounds, nanCount, degenerateCount } = await loadModelFile(file);
+    const { geometry, bounds, nanCount, degenerateCount, originOffset } = await loadModelFile(file);
 
     // Invalidate any in-flight async operations tied to the previous model
     precisionToken++;
@@ -2873,6 +2900,8 @@ async function handleModelFile(file) {
 
     currentGeometry = geometry;
     currentBounds   = bounds;
+    currentPoseRot   = new THREE.Quaternion();
+    currentPoseTrans = originOffset ? originOffset.clone().negate() : new THREE.Vector3(); // mem = orig − centre
     currentStlName  = file.name.replace(/\.(stl|obj|3mf)$/i, '');
     const _extMatch = file.name.match(/\.(stl|obj|3mf)$/i);
     currentStlExt   = _extMatch ? _extMatch[0].toLowerCase() : '';
@@ -4404,6 +4433,43 @@ function buildCombinedFaceWeights(geometry, excludedFaces, invert, settings) {
   return weights;
 }
 
+/**
+ * Map flat position/normal arrays from the in-app working space back to the
+ * model's original file pose: orig = poseRot⁻¹ · (mem − poseTrans). Undoes
+ * both the import centering and any in-app rotation, so exports align with
+ * the untouched source file (issue #82). Normals get the rotation only.
+ */
+function _restoreOriginalPose(positions, normals = null) {
+  const t = currentPoseTrans;
+  // Unit quaternion with |w| ≈ 1 is the identity rotation (either cover) —
+  // pure-translation fast path, and normals stay untouched.
+  if (Math.abs(currentPoseRot.w) > 1 - 1e-12) {
+    if (t.x === 0 && t.y === 0 && t.z === 0) return;
+    for (let i = 0; i < positions.length; i += 3) {
+      positions[i]     -= t.x;
+      positions[i + 1] -= t.y;
+      positions[i + 2] -= t.z;
+    }
+    return;
+  }
+  const rotInv = currentPoseRot.clone().invert();
+  const v = new THREE.Vector3();
+  for (let i = 0; i < positions.length; i += 3) {
+    v.set(positions[i] - t.x, positions[i + 1] - t.y, positions[i + 2] - t.z).applyQuaternion(rotInv);
+    positions[i]     = v.x;
+    positions[i + 1] = v.y;
+    positions[i + 2] = v.z;
+  }
+  if (normals) {
+    for (let i = 0; i < normals.length; i += 3) {
+      v.set(normals[i], normals[i + 1], normals[i + 2]).applyQuaternion(rotInv);
+      normals[i]     = v.x;
+      normals[i + 1] = v.y;
+      normals[i + 2] = v.z;
+    }
+  }
+}
+
 async function handleExport(format = 'stl') {
   if (!currentGeometry || !activeMapEntry || isExporting || isBaking) return;
   const myToken = ++exportToken;
@@ -4455,6 +4521,13 @@ async function handleExport(format = 'stl') {
 
     triLimitWarning.classList.toggle('hidden', !result.safetyCapHit);
     triLimitWarning.textContent = t('warnings.safetyCapHit');
+
+    // Map the pipeline output back to the model's original position and
+    // orientation (issue #82) — in-app rotation is a texturing aid and is
+    // reverted here. The pipeline itself runs in the working space, so this
+    // must stay after runPipeline — and outside of it, keeping the
+    // bench-pipeline fingerprint valid. result arrays are fresh; mutating is safe.
+    _restoreOriginalPose(result.positions, result.normals);
 
     finalGeometry = new THREE.BufferGeometry();
     finalGeometry.setAttribute('position', new THREE.BufferAttribute(result.positions, 3));
@@ -5247,10 +5320,18 @@ exportGoBtn.addEventListener('click', async () => {
     // Mark the custom map as the active reference so the importer restores it
     // even if the user has a preset selected at export time.
     if (includeTexture) payload.activeMapName = customSource.name;
+    // The bundled model is written in its ORIGINAL pose (issue #82), so the
+    // in-app rotation must ride along in the settings for the importer to
+    // replay — otherwise a saved session would lose its orientation.
+    if (includeModel && Math.abs(currentPoseRot.w) < 1 - 1e-12) {
+      payload.poseRotation = currentPoseRot.toArray();
+    }
     const zipFiles = { 'settings.json': strToU8(JSON.stringify(payload, null, 2)) };
 
     if (includeModel) {
-      zipFiles['model.stl'] = _geometryToBinarySTL(currentGeometry);
+      // Written in the original pose (issue #82); re-importing re-centers and
+      // replays poseRotation, so project round-trips stay stable.
+      zipFiles['model.stl'] = _geometryToBinarySTL(currentGeometry, true);
       // Mask indices reference the base geometry's triangles, so they only make
       // sense when shipped alongside the model that produced them.
       const mask = _collectCurrentMask();
@@ -5269,8 +5350,14 @@ exportGoBtn.addEventListener('click', async () => {
   }
 });
 
-/** Pack a BufferGeometry into binary-STL bytes (80-byte header, uint32 count, 50 bytes per triangle). */
-function _geometryToBinarySTL(geo) {
+/** Pack a BufferGeometry into binary-STL bytes (80-byte header, uint32 count, 50 bytes per triangle). With restorePose, vertices/normals are mapped back to the model's original file pose (see _restoreOriginalPose) without mutating the geometry. */
+function _geometryToBinarySTL(geo, restorePose = false) {
+  const t = currentPoseTrans;
+  const rotInv = (restorePose && Math.abs(currentPoseRot.w) < 1 - 1e-12)
+    ? currentPoseRot.clone().invert()
+    : null;
+  const ox = restorePose ? t.x : 0, oy = restorePose ? t.y : 0, oz = restorePose ? t.z : 0;
+  const _v = new THREE.Vector3();
   const pos = geo.attributes.position.array;
   const nor = geo.attributes.normal ? geo.attributes.normal.array : null;
   const triCount = (pos.length / 9) | 0;
@@ -5285,15 +5372,19 @@ function _geometryToBinarySTL(geo) {
     const srcPos = i * 9;
     if (nor) {
       const srcNor = i * 9;
-      view.setFloat32(dst,     nor[srcNor],     true);
-      view.setFloat32(dst + 4, nor[srcNor + 1], true);
-      view.setFloat32(dst + 8, nor[srcNor + 2], true);
+      _v.set(nor[srcNor], nor[srcNor + 1], nor[srcNor + 2]);
+      if (rotInv) _v.applyQuaternion(rotInv);
+      view.setFloat32(dst,     _v.x, true);
+      view.setFloat32(dst + 4, _v.y, true);
+      view.setFloat32(dst + 8, _v.z, true);
     }
     for (let v = 0; v < 3; v++) {
       const d = dst + 12 + v * 12;
-      view.setFloat32(d,     pos[srcPos + v * 3],     true);
-      view.setFloat32(d + 4, pos[srcPos + v * 3 + 1], true);
-      view.setFloat32(d + 8, pos[srcPos + v * 3 + 2], true);
+      _v.set(pos[srcPos + v * 3] - ox, pos[srcPos + v * 3 + 1] - oy, pos[srcPos + v * 3 + 2] - oz);
+      if (rotInv) _v.applyQuaternion(rotInv);
+      view.setFloat32(d,     _v.x, true);
+      view.setFloat32(d + 4, _v.y, true);
+      view.setFloat32(d + 8, _v.z, true);
     }
   }
   return bytes;
@@ -5423,6 +5514,18 @@ async function importProject(file) {
       // below will correctly override those resets.
       const stlFile = new File([unzipped['model.stl']], 'model.stl', { type: 'application/octet-stream' });
       await handleModelFile(stlFile);
+
+      // The bundled model is stored in its original pose; replay the saved
+      // in-app rotation so the session resumes exactly as it was exported.
+      // Runs before applySettingsSnapshot so the finalize's cylinder-axis
+      // reset is overridden by the saved settings, not the other way around.
+      if (data && Array.isArray(data.poseRotation) && data.poseRotation.length === 4) {
+        const q = new THREE.Quaternion().fromArray(data.poseRotation).normalize();
+        if (Math.abs(q.w) < 1 - 1e-12) {
+          _rotateGeometry(q);
+          _rotateFinalize();
+        }
+      }
 
       // Apply settings after the model reset.
       if (data) applySettingsSnapshot(data);
