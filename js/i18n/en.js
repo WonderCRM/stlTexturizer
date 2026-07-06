@@ -119,7 +119,6 @@ export default {
   "ui.harvestFlat": "Keep collapsing flat faces below the triangle limit",
   "ui.harvestTol": "Flat tolerance (mm)",
   "tooltips.harvestTol": "Maximum surface deviation a flat-face collapse may introduce. Higher removes more triangles at larger deviation; ~0.005 mm is imperceptible for FDM printing.",
-  "ui.enableMeshRegularization": "Enable mesh regularization",
   "alerts.bakeFailed": "Bake failed: {msg}",
   "progress.finalizing": "Finalizing…",
   "sections.export": "Export ⓘ",

@@ -119,7 +119,6 @@ export default {
   "ui.harvestFlat": "Flache Flächen auch unter dem Dreieckslimit weiter kollabieren",
   "ui.harvestTol": "Flach-Toleranz (mm)",
   "tooltips.harvestTol": "Maximale Oberflächenabweichung, die ein Kollaps einer flachen Fläche verursachen darf. Höher entfernt mehr Dreiecke bei größerer Abweichung; ~0,005 mm ist für den FDM-Druck nicht wahrnehmbar.",
-  "ui.enableMeshRegularization": "Netz-Regularisierung aktivieren",
   "alerts.bakeFailed": "Einbacken fehlgeschlagen: {msg}",
   "progress.finalizing": "Wird abgeschlossen…",
   "sections.export": "Export ⓘ",

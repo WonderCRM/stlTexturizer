@@ -111,11 +111,11 @@ const settings = {
   cylinderCenterY:  null,
   cylinderRadius:   null,
   cylinderPanelMinimized: false,
-  // Regularize Mesh (Advanced/Beta).  Two-step pipeline applied after the
-  // initial subdivide: collapse sliver chains, then re-subdivide stretched
-  // edges back to a configurable multiple of refineLength.  All knobs here
-  // mirror regularize.js opts; second-pass cap is for the post-regularize
-  // subdivide step in main.js.
+  // Regularize Mesh.  Two-step pipeline applied after the initial subdivide:
+  // collapse sliver chains, then re-subdivide stretched edges back to a
+  // multiple of refineLength.  Always on with these standard values — the
+  // knobs here mirror regularize.js opts; second-pass cap is for the
+  // post-regularize subdivide step in main.js.
   regularizeEnabled:        true,
   regularizeAspectThreshold: 5,
   regularizeSlack:           3.0,
@@ -329,15 +329,6 @@ const smoothBottomChk        = document.getElementById('smooth-bottom-chk');
 const harvestFlatChk         = document.getElementById('harvest-flat-chk');
 const harvestTolInput        = document.getElementById('harvest-tol');
 const harvestTolRow          = document.getElementById('harvest-tol-row');
-const regularizeEnabledChk   = document.getElementById('regularize-enabled-chk');
-const regularizeDebugRows    = document.getElementById('regularize-debug-rows');
-const regAspectThresholdEl   = document.getElementById('reg-aspect-threshold');
-const regSlackEl             = document.getElementById('reg-slack');
-const regAggressiveSlackEl   = document.getElementById('reg-aggressive-slack');
-const regExtremeAspectEl     = document.getElementById('reg-extreme-aspect');
-const regNormalDegEl         = document.getElementById('reg-normal-deg');
-const regAggressiveNormalDegEl = document.getElementById('reg-aggressive-normal-deg');
-const regSecondPassMulEl     = document.getElementById('reg-second-pass-mul');
 
 // ── Exclusion panel DOM refs ──────────────────────────────────────────────────
 const exclBrushBtn        = document.getElementById('excl-brush-btn');
@@ -1449,31 +1440,6 @@ function wireEvents() {
     if (Number.isFinite(v) && v >= 0) settings.harvestTol = v;
     // No preview rebuild needed — harvesting only affects the final decimation.
   });
-
-  // Regularize (Advanced/Beta) — toggle + 7 debug knobs.  The toggle disables
-  // the entire regularize+resub pipeline; the knobs adjust regularize.js opts.
-  regularizeEnabledChk.checked = settings.regularizeEnabled;
-  regularizeDebugRows.classList.toggle('disabled', !settings.regularizeEnabled);
-  regularizeEnabledChk.addEventListener('change', () => {
-    settings.regularizeEnabled = regularizeEnabledChk.checked;
-    regularizeDebugRows.classList.toggle('disabled', !settings.regularizeEnabled);
-    updatePreview();
-  });
-  // Helper — wire a number input to a settings key, schedule a preview update.
-  const _wireRegNumber = (el, key, parser = parseFloat) => {
-    el.value = settings[key];
-    el.addEventListener('input', () => {
-      const v = parser(el.value);
-      if (Number.isFinite(v)) { settings[key] = v; updatePreview(); }
-    });
-  };
-  _wireRegNumber(regAspectThresholdEl,    'regularizeAspectThreshold');
-  _wireRegNumber(regSlackEl,              'regularizeSlack');
-  _wireRegNumber(regAggressiveSlackEl,    'regularizeAggressiveSlack');
-  _wireRegNumber(regExtremeAspectEl,      'regularizeExtremeAspect');
-  _wireRegNumber(regNormalDegEl,          'regularizeNormalDeg');
-  _wireRegNumber(regAggressiveNormalDegEl,'regularizeAggressiveNormalDeg');
-  _wireRegNumber(regSecondPassMulEl,      'regularizeSecondPassMul');
 
   dispPreviewToggle.addEventListener('change', () => {
     toggleDisplacementPreview(dispPreviewToggle.checked);

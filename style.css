@@ -1297,27 +1297,6 @@ input[type="number"].val:focus { outline: none; border-color: var(--accent); }
 /* Hide utility (used by JS to show/hide exclusion sub-rows) */
 .form-row.hidden { display: none; }
 
-/* Regularize debug knob group — visually nested under the toggle */
-.regularize-debug-rows {
-  margin: 4px 0 8px 16px;
-  padding-left: 8px;
-  border-left: 2px solid var(--border);
-}
-.regularize-debug-rows .form-row {
-  margin: 4px 0;
-}
-.regularize-debug-rows label {
-  flex: 1;
-  font-size: 11px;
-  color: var(--text-muted);
-}
-.regularize-debug-rows input[type="number"] {
-  width: 80px;
-}
-.regularize-debug-rows.disabled {
-  opacity: 0.45;
-  pointer-events: none;
-}
 #harvest-tol-row.disabled {
   opacity: 0.45;
   pointer-events: none;

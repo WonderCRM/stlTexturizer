@@ -119,7 +119,6 @@ export default {
   "ui.harvestFlat": "Düz yüzeyleri poligon sınırının ötesinde de sadeleştirmeye devam et",
   "ui.harvestTol": "Düzlük Toleransı (mm)",
   "tooltips.harvestTol": "Düz yüzey sadeleştirmesinin neden olabileceği maksimum yüzey sapması. Daha yüksek değerler, daha büyük sapmalarda, daha fazla poligonu kaldırır; ~0,05 mm FDM baskı için algılanamaz düzeydedir.",
-  "ui.enableMeshRegularization": "Ağ düzenleştirmeyi etkinleştir",
   "alerts.bakeFailed": "Kaplama Uygulaması Başarısız: {msg}",
   "progress.finalizing": "Son İşlemler...",
   "sections.export": "Dışa Aktar ⓘ",
