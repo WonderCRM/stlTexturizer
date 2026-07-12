@@ -3,7 +3,7 @@
 
 export const TRANSLATIONS = {
   en: { 'lang.name': 'English' },
-  de: { 'lang.name': 'Deutsch' },
+  da: { 'lang.name': 'Dansk' },
   it: { 'lang.name': 'Italiano' },
   es: { 'lang.name': 'Español' },
   pt: { 'lang.name': 'Português' },
